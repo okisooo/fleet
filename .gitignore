@@ -26,6 +26,7 @@ assets/
 HANDOFF.md
 
 # never commit build products or symbol files
+graphify-out/
 bin/
 obj/
 build/
