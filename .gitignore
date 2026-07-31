@@ -1,0 +1,29 @@
+# local runtime state and credentials
+.cache/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.fleet-tmp
+.env
+.env.*
+!.env.example
+
+# local captures and test output
+_*.png
+.coverage
+.pytest_cache/
+
+# retired local prototype and unlicensed vendor artwork
+native/
+assets/
+
+# internal project notes; public docs live at the repository root
+HANDOFF.md
+
+# never commit build products or symbol files
+bin/
+obj/
+*.dll
+*.pdb
