@@ -1,50 +1,136 @@
-# fleet
+# Fleet
 
-small Windows 11 tray utility for every AI quota you are paying for: the local
-Claude Code, Codex, Grok and Antigravity installs, plus public API keys like
-OpenRouter, DeepSeek, Kimi, MiniMax, Z.AI, LiteLLM, and any endpoint you describe
-yourself.
+![Fleet flyout](docs/screenshot.png)
 
-Fleet stays in the notification area, cycles provider status in its icon, and
-opens a compact flyout with live/cached freshness, usage bars, and reset times.
+**One small Windows 11 tray app for every AI quota you pay for.**
 
-<img src="docs/screenshot.png" alt="The Fleet flyout: one row per usage window, with bars, reset times and freshness" width="280">
+Fleet watches local coding clients and public API accounts, then puts live usage,
+reset times, balances, and cached freshness one click away.
 
-Every row is a real quota window. Green means the reading is live, amber means it
-is the last cached one and how old it is — above, Antigravity was closed, so its
-numbers are five hours old while the rest are current.
+[![Latest release](https://img.shields.io/github/v/release/okisooo/fleet?label=download)](https://github.com/okisooo/fleet/releases/latest)
+[![CI](https://github.com/okisooo/fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/okisooo/fleet/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/okisooo/fleet)](LICENSE)
 
-## status
+> [!IMPORTANT]
+> Fleet is Windows-only. Provider endpoints and local credential formats can
+> change without notice. Fleet is independent and is not affiliated with any
+> provider listed below.
 
-Windows-only experimental project. It works with locally installed provider
-clients; vendor endpoints and response formats can change without notice.
+## Download
 
-Fleet is an independent project. It is not affiliated with Anthropic, OpenAI,
-xAI, Google, Claude Code, Codex, Grok, or Antigravity.
+Get the latest release from **[GitHub Releases](https://github.com/okisooo/fleet/releases/latest)**:
 
-## easy install
+- **Installer** — `Fleet-Setup-<version>.exe`; per-user install, no admin prompt.
+- **Portable ZIP** — unzip anywhere and run `Fleet.exe`.
 
-Download `Fleet-Setup-<version>.exe` from the project's GitHub Releases page,
-run it, and optionally tick **Start Fleet when I sign in**. Fleet then appears in
-the notification area; left-click toggles the flyout and right-click offers refresh
-or quit. No Python or terminal is needed.
+The installer can start Fleet when you sign in. No Python, terminal, provider CLI,
+or separate runtime is needed.
 
-The installer is per-user (no admin prompt), installs to `%LOCALAPPDATA%\Fleet`,
-and keeps runtime state in `%LOCALAPPDATA%\Fleet\.cache`. Uninstalling removes
-both. Quit Fleet from the tray before installing an update: Setup will otherwise
-ask you to close it.
+> [!WARNING]
+> Releases are currently unsigned. Windows SmartScreen may show a reputation
+> warning on first launch. Verify that your download came from the Fleet Releases
+> page.
 
-A portable ZIP is published alongside the installer. Unzip it anywhere and run
-`Fleet.exe`; it uses the same `%LOCALAPPDATA%\Fleet` state directory and adds no
-Start menu or startup entry.
+## What Fleet shows
 
-Fleet does not install any provider CLI or sign you in: install and sign in to
-the provider apps you want Fleet to display first.
+- Claude Code, Codex, Grok, and Antigravity local client usage.
+- Public API balances and limits from OpenRouter, DeepSeek, Kimi/Moonshot,
+  MiniMax, Z.AI, LiteLLM, OpenAI Admin, and Anthropic Admin APIs.
+- Optional rate-limit probes for OpenAI, Anthropic, Groq, Mistral, Together,
+  Fireworks, Cerebras, DeepInfra, Nebius, xAI, and Perplexity.
+- Custom entries for gateways, proxies, and self-hosted endpoints.
+- Live, cached, and unavailable status for every provider.
+- Usage windows, percentage bars, reset countdowns, credits, and balances.
+- A compact notification-area flyout with no dashboard to keep open.
 
-## from source
+![Fleet status detail](docs/screenshot.png)
 
-Requirements: Windows 11, Python 3.13+, and whichever provider CLIs you want to
-inspect.
+Green means live. Amber means Fleet is showing the last successful reading and
+its age. Red means no usable reading exists.
+
+## Quick start
+
+1. Install a release from [GitHub Releases](https://github.com/okisooo/fleet/releases/latest).
+2. Sign in to the local clients you want Fleet to inspect.
+3. For API providers, set the matching environment variable and restart Fleet.
+
+```powershell
+setx OPENROUTER_API_KEY "your-key"
+```
+
+Left-click the tray icon to open or close the flyout. Right-click for **Refresh
+now** or **Quit**.
+
+See the complete provider list with:
+
+```powershell
+Fleet.exe --providers
+```
+
+## Public API keys
+
+Fleet reads API keys from environment variables. It never puts key values in
+`providers.json`.
+
+Free, read-only usage endpoints activate automatically when their key exists.
+Providers whose quota is exposed only through inference response headers are
+disabled by default because checking them sends a one-token request. Enable those
+with `"probe": true` in `providers.json` only when you accept that request and its
+possible cost.
+
+Full provider matrix and setup details: [docs/providers.md](docs/providers.md).
+
+## Custom providers
+
+Create `%LOCALAPPDATA%\Fleet\providers.json` beside the packaged app state, or
+`providers.json` in the repository when running from source:
+
+```json
+{
+  "custom": [
+    {
+      "id": "my-gateway",
+      "label": "My Gateway",
+      "url": "https://gateway.example.com/usage",
+      "env": "MY_GATEWAY_API_KEY",
+      "metrics": [
+        {
+          "label": "Monthly",
+          "kind": "pct",
+          "used": "usage.month",
+          "limit": "limits.month",
+          "resets": "limits.reset_at"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Custom requests use HTTPS, bearer authentication, a bounded response, and safe
+JSON field paths. Loopback HTTP is allowed for a proxy running on your own
+machine. See [providers.example.json](providers.example.json) and
+[docs/providers.md](docs/providers.md) for all mapping types.
+
+## Privacy and safety
+
+- No Fleet telemetry or Fleet backend.
+- Credentials are read locally and sent only to the matching provider endpoint.
+- Custom provider key values come from environment variables, never config files.
+- Runtime cache lives in `%LOCALAPPDATA%\Fleet\.cache` for packaged builds and
+  `.cache` for source builds.
+- Claude refresh is delegated to Claude Code. Fleet does not ship copied OAuth
+  client secrets.
+- Antigravity uses its local language server and short-lived local state.
+- `--debug` prints status and exception types, never tokens or response bodies.
+
+Use Fleet only with accounts and machines you control. Review provider terms
+before using undocumented usage endpoints.
+
+## From source
+
+Requirements: Windows 11, Python 3.13+, and any local provider clients you want
+to inspect.
 
 ```powershell
 git clone https://github.com/okisooo/fleet.git
@@ -54,83 +140,20 @@ py -3.13 -m venv .venv
 .\fleet-tray.cmd
 ```
 
-Left-click the tray icon to toggle the flyout. Right-click for refresh and quit.
-
-A source checkout keeps its state in the repository's own `.cache\`, which is
-ignored by Git.
+Useful checks:
 
 ```powershell
-.\.venv\Scripts\python.exe tray.py --dry   # one line per provider, no window
-.\.venv\Scripts\python.exe fleet.py --once # full terminal view (needs `rich`)
-```
-
-## providers
-
-Local clients are detected on their own. Public API providers switch on as soon
-as their key is in an environment variable:
-
-```powershell
-setx OPENROUTER_API_KEY "sk-or-..."
-```
-
-Free usage endpoints: OpenRouter, DeepSeek, Kimi (Moonshot), MiniMax, Z.AI,
-LiteLLM, and organisation cost for OpenAI and Anthropic admin keys. Providers
-that publish quota only in rate-limit headers (OpenAI, Anthropic, Groq, Mistral,
-Together, Fireworks, Cerebras, DeepInfra, Nebius, xAI, Perplexity) need a real
-1-token request, so they stay off until you opt in per provider.
-
-Anything else — a gateway, a proxy, a self-hosted deployment — can be added as a
-custom entry with one URL and a few field paths. Keys are read from environment
-variables only; the config file holds variable names, never secrets.
-
-Full list, config format and custom-entry schema: [docs/providers.md](docs/providers.md).
-
-```powershell
-.\.venv\Scripts\python.exe fleet.py --providers   # what is configured, and how
-```
-
-## releases
-
-Maintainers build a portable app and installer with the **release build**
-GitHub workflow. It runs the test suite first, uploads both artifacts for manual
-runs, and publishes them automatically only for a `v*` version tag. Local build
-steps are in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-Releases are unsigned until the project obtains a Windows code-signing
-certificate, so Windows SmartScreen can warn about an unrecognised app the first
-time a release is run. Verify the download came from the project's Releases page.
-
-## privacy and credential behavior
-
-- Fleet reads local CLI/app credential state only to request the corresponding
-  provider's usage data.
-- Tokens are sent only to that provider's HTTPS endpoints or to Antigravity's
-  loopback language server. Fleet does not send telemetry to a Fleet service.
-- Runtime state lives in `.cache/`, which is ignored by Git. Never commit it.
-- Claude refreshes through Claude Code first. Grok can atomically update its own
-  CLI credential file if its provider rotates a token. Codex refresh is opt-in
-  for the console tool via `--refresh`.
-- Antigravity reads live data from its local language server. When it is closed,
-  Fleet may use an existing short-lived local access token, then falls back to
-  the last cached reading. Fleet does not refresh that token with a copied
-  third-party OAuth client.
-- `--debug` prints status and exception types, never token or response-body data.
-
-Use only with accounts and machines you control. Review each provider's terms
-before using undocumented usage endpoints.
-
-## development
-
-```powershell
+.\.venv\Scripts\python.exe tray.py --dry
+.\.venv\Scripts\python.exe fleet.py --once
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Contribution and local packaging instructions: [CONTRIBUTING.md](CONTRIBUTING.md).
+## Project status
 
-The project deliberately uses original provider monograms instead of vendor
-logos, so the repository does not redistribute third-party artwork. The app icon
-is generated at build time by `scripts/build_assets.py`.
+Fleet is an experimental public release. It currently targets Windows 11 and
+ships as version [v0.1.0](https://github.com/okisooo/fleet/releases/tag/v0.1.0).
+Provider APIs, authentication flows, and local client formats are outside Fleet's
+control; broken readings should be reported with provider name, Fleet version,
+and redacted debug output.
 
-## security
-
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+Security reports: [SECURITY.md](SECURITY.md).
