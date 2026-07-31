@@ -49,6 +49,11 @@ def _bar_fill(pct):
     return max(3.0, BAR_TRACK * pct / 100.0)
 PROVIDER_MARKS = {"Claude": "C", "Codex": "X", "Grok": "G", "Antigrav": "A"}
 PROVIDER_ACCENTS = {"Claude": "#FFF59E0B", "Codex": "#FF22D3EE", "Grok": "#FFD946EF", "Antigrav": "#FF22C55E"}
+# Fallback palette for API-key and custom providers, which Fleet cannot know ahead of time.
+API_ACCENTS = [
+    "#FF60A5FA", "#FF34D399", "#FFFBBF24", "#FFA78BFA",
+    "#FFF472B6", "#FF38BDF8", "#FFFB923C", "#FF94A3B8",
+]
 GRAD = {"g": "#FF3FB950", "y": "#FFD29922", "r": "#FFF85149", "n": "#FF6E7681"}
 
 
@@ -362,13 +367,38 @@ def _metric_row(
       </Grid>"""
 
 
+def _mark_for(name):
+    """API-key providers are user-configurable, so their mark comes from the name."""
+    letters = [char for char in str(name) if char.isalnum()]
+    return letters[0].upper() if letters else "?"
+
+
+def _accent_for(name):
+    # Deterministic across restarts on purpose: Python's str hash is salted per
+    # process, which would repaint every provider a new colour on each launch.
+    checksum = sum(ord(char) for char in str(name))
+    return API_ACCENTS[checksum % len(API_ACCENTS)]
+
+
+def _headline(metrics):
+    """The one row a compact provider gets: its worst window, else its first fact."""
+    scored = [metric for metric in metrics if metric.get("pct") is not None]
+    if scored:
+        return max(scored, key=lambda metric: metric["pct"])
+    return metrics[0]
+
+
 def _card(agent, theme, last=False):
     raw_name = agent.get("agent") or "Unknown"
     name = "Antigravity" if raw_name == "Antigrav" else raw_name
-    mark = PROVIDER_MARKS.get(raw_name, "?")
-    accent = PROVIDER_ACCENTS.get(raw_name, theme["track"])
+    mark = PROVIDER_MARKS.get(raw_name) or _mark_for(name)
+    accent = PROVIDER_ACCENTS.get(raw_name) or _accent_for(name)
 
     metrics = agent.get("metrics") or []
+    if agent.get("compact") and metrics:
+        # One line per API-key provider: the flyout stays a glance widget even
+        # with a dozen of them configured.
+        metrics = [_headline(metrics)]
     status_text = agent.get("_status_text") or "unavailable"
     status_color = agent.get("_status_color") or GRAD["n"]
     if metrics:

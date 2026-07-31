@@ -1,5 +1,6 @@
 # local runtime state and credentials
 .cache/
+providers.json
 .venv/
 .build-venv/
 __pycache__/

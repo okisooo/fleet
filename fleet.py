@@ -21,9 +21,12 @@ Run:  uv run --with rich python fleet.py            # live API view, 30s refresh
 Endpoints/field shapes cribbed from openusage (MIT, robinebers/openusage).
 """
 from __future__ import annotations
-import argparse, base64, email.utils, glob, json, os, re, sqlite3, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
+import argparse, base64, concurrent.futures, email.utils, glob, json, os, re, sqlite3, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import apikeys
 
 for _s in (sys.stdout, sys.stderr):  # Windows consoles default to cp932/cp1252
     try:
@@ -805,15 +808,66 @@ def _agy_credit_balance():
 API_PROVIDERS = [api_claude, api_codex, api_grok, api_antigravity]
 
 
-def collect_api(force_claude=False):
+# ================= PUBLIC API KEYS + CUSTOM ENTRIES =================
+def _api_key_specs():
+    config, err = apikeys.load_config(_ROOT)
+    if err:
+        dbg("providers.json", err)
+    return apikeys.enabled_specs(config), err
+
+
+def _collect_one_spec(spec):
+    agent = f"api_{spec['id']}"
+    try:
+        out = apikeys.collect(spec, _http, _header, M)
+    except Exception as e:
+        dbg("apikey", spec["id"], repr(e))
+        out = dict(agent=spec["label"], plan="", metrics=[], err=f"crash: {e.__class__.__name__}",
+                   api_id=spec["id"], compact=True)
+    if out.get("metrics"):
+        _save_last(agent, out)
+        return out
+    cached = _cached_or(out, agent)
+    cached["compact"] = True
+    cached["api_id"] = spec["id"]
+    return cached
+
+
+def collect_api_keys(specs=None):
+    """Read every configured API-key provider at once; they are independent."""
+    specs = _api_key_specs()[0] if specs is None else specs
+    if not specs:
+        return []
+    workers = min(8, len(specs))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_collect_one_spec, specs))
+
+
+def collect_api(force_claude=False, include_api_keys=True):
     out = []
-    for p in API_PROVIDERS:
-        try:
-            out.append(p(force=force_claude) if p is api_claude else p())
-        except Exception as e:
-            dbg(p.__name__, repr(e))
-            out.append(dict(agent=p.__name__.replace("api_", "").title()[:8], plan="",
-                            metrics=[], err=f"crash: {e.__class__.__name__}"))
+    specs = _api_key_specs()[0] if include_api_keys else []
+    pool = pending = None
+    if specs:
+        # Started first: they are pure HTTP and finish while the local providers
+        # are still reading credential files and shelling out to the CLIs.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(specs)))
+        pending = [pool.submit(_collect_one_spec, spec) for spec in specs]
+    try:
+        for p in API_PROVIDERS:
+            try:
+                out.append(p(force=force_claude) if p is api_claude else p())
+            except Exception as e:
+                dbg(p.__name__, repr(e))
+                out.append(dict(agent=p.__name__.replace("api_", "").title()[:8], plan="",
+                                metrics=[], err=f"crash: {e.__class__.__name__}"))
+        for future in pending or []:
+            try:
+                out.append(future.result(timeout=30))
+            except Exception as e:
+                dbg("apikey future", repr(e))
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False)
     return out
 
 
@@ -932,6 +986,26 @@ def table_api(data):
     return t
 
 
+def print_providers():
+    """Show which API-key providers are wired up, so setup needs no guesswork."""
+    config, err = apikeys.load_config(_ROOT)
+    if err:
+        print(f"! {err}")
+    active = {spec["id"] for spec in apikeys.enabled_specs(config)}
+    print(f"config: {apikeys.config_path(_ROOT)}"
+          f"{'' if apikeys.config_path(_ROOT).exists() else '  (not created yet)'}\n")
+    for spec in apikeys.BUILTIN:
+        kind = "probe (opt-in, costs a token)" if spec.get("probe") else "usage endpoint (free)"
+        state = "ON " if spec["id"] in active else "   "
+        variables = " or ".join(spec.get("env") or ["-"])
+        print(f"{state} {spec['id']:<16} {variables:<44} {kind}")
+    for spec in (apikeys.normalize_custom(entry, i)
+                 for i, entry in enumerate(config.get("custom") or [])):
+        if spec:
+            print(f"ON  {spec['id']:<16} {' or '.join(spec['env']) or '-':<44} custom entry")
+    print("\nSet the variable, then restart Fleet. Probes need \"probe\": true in the config.")
+
+
 def table_logs(rows):
     from rich.table import Table
     from rich import box
@@ -963,9 +1037,15 @@ def main():
     ap.add_argument("--refresh", action="store_true",
                     help="opt-in: refresh expired tokens (may rotate the CLI's own token)")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--providers", action="store_true",
+                    help="list API-key providers, their variables, and what is enabled")
     a = ap.parse_args()
     DEBUG = a.debug
     REFRESH = a.refresh
+
+    if a.providers:
+        print_providers()
+        return
 
     from rich.console import Console
     from rich.live import Live

@@ -1,7 +1,9 @@
 # fleet
 
-small Windows 11 tray utility for viewing quota and usage windows from local
-Claude Code, Codex, Grok, and Antigravity installations.
+small Windows 11 tray utility for every AI quota you are paying for: the local
+Claude Code, Codex, Grok and Antigravity installs, plus public API keys like
+OpenRouter, DeepSeek, Kimi, MiniMax, Z.AI, LiteLLM, and any endpoint you describe
+yourself.
 
 Fleet stays in the notification area, cycles provider status in its icon, and
 opens a compact flyout with live/cached freshness, usage bars, and reset times.
@@ -54,6 +56,31 @@ ignored by Git.
 ```powershell
 .\.venv\Scripts\python.exe tray.py --dry   # one line per provider, no window
 .\.venv\Scripts\python.exe fleet.py --once # full terminal view (needs `rich`)
+```
+
+## providers
+
+Local clients are detected on their own. Public API providers switch on as soon
+as their key is in an environment variable:
+
+```powershell
+setx OPENROUTER_API_KEY "sk-or-..."
+```
+
+Free usage endpoints: OpenRouter, DeepSeek, Kimi (Moonshot), MiniMax, Z.AI,
+LiteLLM, and organisation cost for OpenAI and Anthropic admin keys. Providers
+that publish quota only in rate-limit headers (OpenAI, Anthropic, Groq, Mistral,
+Together, Fireworks, Cerebras, DeepInfra, Nebius, xAI, Perplexity) need a real
+1-token request, so they stay off until you opt in per provider.
+
+Anything else — a gateway, a proxy, a self-hosted deployment — can be added as a
+custom entry with one URL and a few field paths. Keys are read from environment
+variables only; the config file holds variable names, never secrets.
+
+Full list, config format and custom-entry schema: [docs/providers.md](docs/providers.md).
+
+```powershell
+.\.venv\Scripts\python.exe fleet.py --providers   # what is configured, and how
 ```
 
 ## releases

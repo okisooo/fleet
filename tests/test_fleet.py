@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import apikeys
 import fleet
 import panel_wpf
 import tray
@@ -318,6 +319,240 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertIn('return [sys.executable, "--panel-host"]', tray_source)
 
 
+OPENROUTER_PAYLOAD = {
+    "data": {
+        "label": "sk-or-v1-...",
+        "limit": 20.0,
+        "limit_remaining": 5.0,
+        "limit_reset": "2026-08-01T00:00:00Z",
+        "usage": 15.0,
+        "usage_daily": 1.25,
+        "usage_monthly": 9.5,
+        "is_free_tier": False,
+    }
+}
+
+
+class PathResolverTests(unittest.TestCase):
+    def test_walks_objects_indices_and_filters(self):
+        payload = {
+            "a": {"b": [{"v": 1}, {"v": 2}]},
+            "data": [{"type": "TOKENS_LIMIT", "percentage": 41.5},
+                     {"type": "TIME_LIMIT", "percentage": 3.0}],
+        }
+
+        self.assertEqual(apikeys.resolve(payload, "a.b[1].v"), 2)
+        self.assertEqual(apikeys.resolve(payload, "data[type=TOKENS_LIMIT].percentage"), 41.5)
+
+    def test_missing_or_wrong_shape_is_none_not_a_crash(self):
+        payload = {"a": {"b": 1}}
+
+        self.assertIsNone(apikeys.resolve(payload, "a.missing.deep"))
+        self.assertIsNone(apikeys.resolve(payload, "a.b[0]"))
+        self.assertIsNone(apikeys.resolve(payload, "data[type=nope].x"))
+        self.assertIsNone(apikeys.resolve(payload, ""))
+
+
+class MetricMappingTests(unittest.TestCase):
+    def test_money_metric_formats_the_currency_it_was_given(self):
+        payload = {"balance_infos": [{"total_balance": "110.00", "currency": "CNY"}]}
+        specs = [{"label": "Balance", "kind": "money",
+                  "value": "balance_infos[0].total_balance",
+                  "currency": "balance_infos[0].currency"}]
+
+        metrics = apikeys.build_metrics(payload, specs, fleet.M)
+
+        self.assertEqual(metrics[0]["extra"], "¥110.00")
+        self.assertIsNone(metrics[0]["pct"])
+
+    def test_spend_against_a_cap_becomes_a_percentage(self):
+        specs = apikeys.BUILTIN_BY_ID["openrouter"]["metrics"]
+
+        metrics = apikeys.build_metrics(OPENROUTER_PAYLOAD, specs, fleet.M)
+
+        self.assertEqual(metrics[0]["label"], "Key cap")
+        self.assertEqual(metrics[0]["pct"], 75.0)
+        self.assertEqual(metrics[0]["extra"], "$15.00")
+        self.assertEqual(metrics[0]["resets"], "2026-08-01T00:00:00Z")
+        self.assertEqual(metrics[1]["extra"], "$9.50")
+
+    def test_a_remaining_count_is_converted_to_used(self):
+        payload = {"quota": {"total": 200, "left": 50}}
+        specs = [{"label": "Quota", "kind": "pct", "limit": "quota.total",
+                  "remaining": "quota.left"}]
+
+        self.assertEqual(apikeys.build_metrics(payload, specs, fleet.M)[0]["pct"], 75.0)
+
+    def test_metrics_with_no_data_are_dropped_instead_of_showing_zero(self):
+        specs = [{"label": "Balance", "kind": "money", "value": "nope"},
+                 {"label": "Cap", "kind": "pct", "used": "a", "limit": "b"}]
+
+        self.assertEqual(apikeys.build_metrics({}, specs, fleet.M), [])
+
+
+class ProviderEnablementTests(unittest.TestCase):
+    def test_a_key_in_the_environment_turns_its_provider_on(self):
+        specs = apikeys.enabled_specs({}, {"OPENROUTER_API_KEY": "sk-or-test"})
+
+        self.assertEqual([spec["id"] for spec in specs], ["openrouter"])
+
+    def test_probe_providers_stay_off_until_opted_in(self):
+        environ = {"GROQ_API_KEY": "gsk-test"}  # pragma: allowlist secret
+
+        self.assertEqual(apikeys.enabled_specs({}, environ), [])
+
+        opted = apikeys.enabled_specs({"providers": {"groq": {"probe": True}}}, environ)
+
+        self.assertEqual([spec["id"] for spec in opted], ["groq"])
+
+    def test_config_can_disable_a_provider_or_point_at_another_variable(self):
+        environ = {"OPENROUTER_API_KEY": "a", "WORK_KEY": "b", "DEEPSEEK_API_KEY": "c"}
+        config = {"providers": {"openrouter": {"enabled": False},
+                                "deepseek": {"env": "WORK_KEY"}}}
+
+        specs = apikeys.enabled_specs(config, environ)
+
+        self.assertEqual([spec["id"] for spec in specs], ["deepseek"])
+        self.assertEqual(specs[0]["env"], ["WORK_KEY"])
+
+    def test_custom_entries_need_a_url_and_at_least_one_metric(self):
+        config = {"custom": [
+            {"id": "proxy", "label": "Proxy", "url": "https://p.example/usage",
+             "env": "PROXY_KEY", "metrics": [{"label": "Spend", "kind": "money", "value": "spend"}]},
+            {"id": "broken", "url": "https://p.example/usage"},
+            {"id": "alsobroken", "metrics": [{"label": "x", "value": "y"}]},
+        ]}
+
+        specs = apikeys.enabled_specs(config, {})
+
+        self.assertEqual([spec["id"] for spec in specs], ["proxy"])
+
+
+class ApiKeyCollectionTests(unittest.TestCase):
+    def _http(self, status=200, payload=None, headers=None, record=None):
+        def fake(method, url, request_headers=None, body=None, form=False, timeout=12):
+            if record is not None:
+                record.append((method, url, dict(request_headers or {}), body))
+            return status, dict(headers or {}), json.dumps(payload or {}).encode()
+
+        return fake
+
+    def test_reads_a_usage_endpoint_into_fleet_metrics(self):
+        record = []
+        spec = dict(apikeys.BUILTIN_BY_ID["openrouter"], env=["OPENROUTER_API_KEY"])
+
+        with mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):  # pragma: allowlist secret
+            out = apikeys.collect(
+                spec, self._http(payload=OPENROUTER_PAYLOAD, record=record), fleet._header, fleet.M
+            )
+
+        self.assertEqual(out["agent"], "OpenRouter")
+        self.assertTrue(out["compact"])
+        self.assertEqual(out["err"], "")
+        self.assertEqual(out["plan"], "paid")
+        self.assertEqual(out["metrics"][0]["pct"], 75.0)
+        self.assertEqual(record[0][0], "GET")
+        self.assertEqual(record[0][2]["Authorization"], "Bearer sk-or-test")
+
+    def test_a_provider_without_its_key_reports_instead_of_calling_out(self):
+        record = []
+        spec = dict(apikeys.BUILTIN_BY_ID["deepseek"], env=["DEEPSEEK_API_KEY"])
+
+        with mock.patch.dict("os.environ", {}, clear=True):
+            out = apikeys.collect(spec, self._http(record=record), fleet._header, fleet.M)
+
+        self.assertEqual(out["err"], "no key")
+        self.assertEqual(record, [])
+
+    def test_custom_entries_over_plain_http_are_refused(self):
+        record = []
+        spec = apikeys.normalize_custom({
+            "id": "insecure", "url": "http://example.com/usage", "env": "K",
+            "metrics": [{"label": "Spend", "kind": "money", "value": "spend"}],
+        })
+
+        with mock.patch.dict("os.environ", {"K": "secret"}, clear=False):
+            out = apikeys.collect(spec, self._http(record=record), fleet._header, fleet.M)
+
+        self.assertEqual(out["err"], "refused: not https")
+        self.assertEqual(record, [])
+
+    def test_a_self_hosted_proxy_may_use_loopback_http(self):
+        spec = dict(apikeys.BUILTIN_BY_ID["litellm"], env=["LITELLM_API_KEY"])
+        payload = {"info": {"spend": 3.0, "max_budget": 12.0}}
+        record = []
+
+        with mock.patch.dict(
+            "os.environ",
+            {"LITELLM_API_KEY": "sk-litellm", "LITELLM_BASE_URL": "http://127.0.0.1:4000"},  # pragma: allowlist secret
+            clear=False,
+        ):
+            out = apikeys.collect(spec, self._http(payload=payload, record=record), fleet._header, fleet.M)
+
+        self.assertEqual(record[0][1], "http://127.0.0.1:4000/key/info")
+        self.assertEqual(out["metrics"][0]["pct"], 25.0)
+
+    def test_an_error_status_never_invents_metrics(self):
+        spec = dict(apikeys.BUILTIN_BY_ID["deepseek"], env=["DEEPSEEK_API_KEY"])
+
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}, clear=False):
+            out = apikeys.collect(spec, self._http(status=401), fleet._header, fleet.M)
+
+        self.assertEqual(out["metrics"], [])
+        self.assertEqual(out["err"], "http 401")
+
+    def test_probe_reads_rate_limit_headers_from_a_one_token_request(self):
+        record = []
+        spec = dict(apikeys.BUILTIN_BY_ID["groq"], env=["GROQ_API_KEY"], _settings={})
+        headers = {
+            "x-ratelimit-limit-requests": "1000",
+            "x-ratelimit-remaining-requests": "900",
+            "x-ratelimit-reset-requests": "1m30s",
+            "x-ratelimit-limit-tokens": "6000",
+            "x-ratelimit-remaining-tokens": "3000",
+        }
+
+        with mock.patch.dict("os.environ", {"GROQ_API_KEY": "gsk"}, clear=False):  # pragma: allowlist secret
+            out = apikeys.collect(
+                spec, self._http(headers=headers, record=record), fleet._header, fleet.M
+            )
+
+        method, url, sent, body = record[0]
+        self.assertEqual((method, url), ("POST", "https://api.groq.com/openai/v1/chat/completions"))
+        self.assertEqual(body["max_tokens"], 1)
+        self.assertEqual([m["label"] for m in out["metrics"]], ["Requests", "Tokens"])
+        self.assertEqual(out["metrics"][0]["pct"], 10.0)
+        self.assertEqual(out["metrics"][1]["pct"], 50.0)
+        self.assertAlmostEqual(out["metrics"][0]["resets"] - time.time(), 90, delta=2)
+
+    def test_anthropic_probe_uses_its_own_header_family_and_key_header(self):
+        record = []
+        spec = dict(apikeys.BUILTIN_BY_ID["anthropic"], env=["ANTHROPIC_API_KEY"], _settings={})
+        headers = {
+            "anthropic-ratelimit-requests-limit": "50",
+            "anthropic-ratelimit-requests-remaining": "45",
+            "anthropic-ratelimit-requests-reset": "2026-08-01T10:00:00Z",
+        }
+
+        with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant"}, clear=False):  # pragma: allowlist secret
+            out = apikeys.collect(
+                spec, self._http(headers=headers, record=record), fleet._header, fleet.M
+            )
+
+        self.assertEqual(record[0][2]["x-api-key"], "sk-ant")
+        self.assertNotIn("Authorization", record[0][2])
+        self.assertEqual(out["metrics"][0]["pct"], 10.0)
+
+    def test_a_broken_config_file_does_not_stop_polling(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / apikeys.CONFIG_NAME).write_text("{not json", encoding="utf-8")
+            config, err = apikeys.load_config(root)
+
+        self.assertEqual(config, {})
+        self.assertIn(apikeys.CONFIG_NAME, err)
+
+
 class PackagingTests(unittest.TestCase):
     REPO = Path(__file__).resolve().parent.parent
 
@@ -405,6 +640,41 @@ class TrayIconTests(unittest.TestCase):
         ]
 
         self.assertEqual(tray.usage_cycle(data), [("Claude", 71), ("Codex", None)])
+
+    def test_api_providers_are_capped_and_ordered_worst_first(self):
+        data = [
+            {"agent": "Claude", "metrics": [{"pct": 24}]},
+            {"agent": "Codex", "metrics": [{"pct": 10}]},
+            {"agent": "Grok", "metrics": [{"pct": 5}]},
+            {"agent": "Antigrav", "metrics": [{"pct": 1}]},
+            {"agent": "DeepSeek", "compact": True, "metrics": [{"pct": None, "extra": "$4.00"}]},
+            {"agent": "OpenRouter", "compact": True, "metrics": [{"pct": 90}]},
+            {"agent": "Kimi", "compact": True, "metrics": [{"pct": 40}]},
+        ]
+
+        cycle = tray.usage_cycle(data)
+
+        self.assertEqual(len(cycle), tray.CYCLE_CAP)
+        self.assertEqual(cycle[4], ("OpenRouter", 90))
+        self.assertEqual(cycle[5], ("Kimi", 40))
+
+    def test_the_tooltip_stays_inside_the_windows_limit(self):
+        data = [
+            {"agent": f"Provider{index}", "compact": True, "metrics": [{"pct": 50 + index}]}
+            for index in range(12)
+        ]
+
+        text = tray.tooltip(data)
+
+        self.assertLessEqual(len(text), 126)
+        self.assertTrue(text.startswith("FLEET"))
+
+    def test_a_provider_fleet_has_no_table_entry_for_still_gets_a_mark(self):
+        icon = tray.make_icon_image("OpenRouter", 30)
+
+        self.assertEqual(icon.size, (64, 64))
+        self.assertEqual(tray._mark_for("OpenRouter"), "O")
+        self.assertEqual(tray._accent_for("Kimi"), tray._accent_for("Kimi"))
 
     def test_provider_mark_changes_the_icon(self):
         claude = tray.make_icon_image("Claude", 50)
@@ -505,6 +775,56 @@ class PanelLayoutTests(unittest.TestCase):
         )
 
         self.assertEqual((left, top), (58.0, 293.0))
+
+
+class CompactProviderTests(unittest.TestCase):
+    def _rows(self, agent):
+        markup = panel_wpf._card(agent, panel_wpf._theme(True))
+        return markup.count("<Grid Height=")
+
+    def test_an_api_provider_collapses_to_one_row(self):
+        agent = {
+            "agent": "OpenRouter",
+            "compact": True,
+            "metrics": [
+                {"label": "Key cap", "pct": 75.0, "extra": "$15.00"},
+                {"label": "Spend mo", "pct": None, "extra": "$9.50"},
+                {"label": "Spend day", "pct": None, "extra": "$1.25"},
+            ],
+        }
+
+        self.assertEqual(self._rows(agent), 1)
+        self.assertIn("75%", panel_wpf._card(agent, panel_wpf._theme(True)))
+
+    def test_a_local_cli_provider_keeps_every_window(self):
+        agent = {
+            "agent": "Claude",
+            "metrics": [
+                {"label": "Session", "pct": 21.0, "extra": ""},
+                {"label": "Weekly", "pct": 3.0, "extra": ""},
+            ],
+        }
+
+        self.assertEqual(self._rows(agent), 2)
+
+    def test_the_headline_row_is_the_worst_window_not_the_first(self):
+        metrics = [{"label": "a", "pct": 10.0}, {"label": "b", "pct": 80.0}]
+
+        self.assertEqual(panel_wpf._headline(metrics)["label"], "b")
+
+    def test_a_balance_only_provider_shows_its_amount(self):
+        agent = {"agent": "DeepSeek", "compact": True,
+                 "metrics": [{"label": "Balance", "pct": None, "extra": "$4.00"}]}
+
+        markup = panel_wpf._card(agent, panel_wpf._theme(True))
+
+        self.assertEqual(self._rows(agent), 1)
+        self.assertIn("$4.00", markup)
+
+    def test_unknown_providers_get_a_stable_colour(self):
+        self.assertEqual(panel_wpf._accent_for("Kimi"), panel_wpf._accent_for("Kimi"))
+        self.assertIn(panel_wpf._accent_for("Kimi"), panel_wpf.API_ACCENTS)
+        self.assertEqual(panel_wpf._mark_for("openrouter"), "O")
 
 
 class PanelSurfaceTests(unittest.TestCase):

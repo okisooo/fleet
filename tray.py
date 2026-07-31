@@ -30,12 +30,28 @@ PANEL_SIGNAL = CACHE / "panel.show"
 PANEL_QUIT = CACHE / "panel.quit"
 REFRESH_SECS = 90
 CYCLE_SECS = 2
+CYCLE_CAP = 6  # icon frames per loop; see usage_cycle
 SHORT = {"Claude": "CL", "Codex": "CX", "Grok": "GR", "Antigrav": "AG"}
 MARK = {"Claude": "C", "Codex": "X", "Grok": "G", "Antigrav": "A"}
 
 # palette (dark card -> readable regardless of OS light/dark theme)
 BG, CARD, FG, MUTED, TRACK = "#15151d", "#1e1e28", "#e8e8f0", "#9a9aa8", "#33333f"
 ACCENT = {"Claude": "#f59e0b", "Codex": "#22d3ee", "Grok": "#d946ef", "Antigrav": "#22c55e"}
+# API-key and custom providers are named by the user, so their mark and colour
+# are derived from the name instead of a table.
+API_ACCENT = ["#60a5fa", "#34d399", "#fbbf24", "#a78bfa", "#f472b6", "#38bdf8", "#fb923c", "#94a3b8"]
+
+
+def _mark_for(agent):
+    letters = [char for char in str(agent or "") if char.isalnum()]
+    return MARK.get(agent) or (letters[0].upper() if letters else "F")
+
+
+def _accent_for(agent):
+    # Stable across restarts: str hash is salted per process.
+    if agent in ACCENT:
+        return ACCENT[agent]
+    return API_ACCENT[sum(ord(char) for char in str(agent or "")) % len(API_ACCENT)]
 
 
 _ERROR_ALREADY_EXISTS = 183
@@ -139,14 +155,23 @@ def sev(pct):
 
 # ---------- tray icon ----------
 def usage_cycle(data):
-    frames = []
+    """Icon frames, worst first for API providers and capped.
+
+    Every configured API key would otherwise add two seconds to the loop, so a
+    user with a dozen keys would wait half a minute to see Claude come round.
+    """
+    local, api = [], []
     for provider in data:
         pcts = [
             metric["pct"]
             for metric in provider.get("metrics", [])
             if metric.get("pct") is not None
         ]
-        frames.append((provider.get("agent"), max(pcts) if pcts else None))
+        frame = (provider.get("agent"), max(pcts) if pcts else None)
+        (api if provider.get("compact") else local).append(frame)
+    # Worst window first; balance-only providers have no percentage and go last.
+    api.sort(key=lambda frame: (frame[1] is None, -(frame[1] or 0.0)))
+    frames = local + api[: max(0, CYCLE_CAP - len(local))]
     return frames or [(None, None)]
 
 
@@ -166,8 +191,8 @@ def make_icon_image(agent, pct):
     elif pct > 0:
         d.arc(box, -90, -90 + min(360, 360 * pct / 100), fill=r + (255,), width=w)
 
-    mark = MARK.get(agent, "F")
-    accent = ACCENT.get(agent, FG)
+    mark = _mark_for(agent)
+    accent = _accent_for(agent)
     color = tuple(int(accent[i:i + 2], 16) for i in (1, 3, 5))
     font = ImageFont.load_default(size=25)
     left, top, right, bottom = d.textbbox((0, 0), mark, font=font)
@@ -181,12 +206,22 @@ def make_icon_image(agent, pct):
 
 
 def tooltip(data):
+    # Same selection as the icon cycle: a Windows tooltip is capped at 128 chars,
+    # so listing every configured key would cut a provider in half.
+    by_name = {d.get("agent"): d for d in data}
     parts = []
-    for d in data:
-        s = SHORT.get(d["agent"], d["agent"][:2])
-        pcts = [m["pct"] for m in d["metrics"] if m["pct"] is not None]
-        parts.append(f"{s} {max(pcts):.0f}%" if pcts else
-                     (f"{s} {d['metrics'][0]['label'][:6]}" if d["metrics"] else f"{s} –"))
+    for agent, pct in usage_cycle(data):
+        d = by_name.get(agent)
+        if d is None:
+            continue
+        s = SHORT.get(agent) or str(agent)[:2].upper()
+        if pct is not None:
+            parts.append(f"{s} {pct:.0f}%")
+        elif d.get("metrics"):
+            first = d["metrics"][0]
+            parts.append(f"{s} {(first.get('extra') or first.get('label') or '')[:8]}".strip())
+        else:
+            parts.append(f"{s} –")
     return ("FLEET   " + "   ".join(parts))[:126]
 
 

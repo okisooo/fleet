@@ -1,0 +1,34 @@
+{
+  "_comment": "Copy to providers.json next to Fleet's data (see docs/providers.md). Never put a key in this file: 'env' names the environment variable that holds it.",
+  "providers": {
+    "openrouter": { "enabled": true },
+    "deepseek": { "env": "WORK_DEEPSEEK_KEY" },
+    "groq": { "probe": true },
+    "openai": { "probe": true, "model": "gpt-4o-mini" },
+    "litellm": { "base_url": "http://127.0.0.1:4000" }
+  },
+  "custom": [
+    {
+      "id": "gateway",
+      "label": "Gateway",
+      "url": "https://gateway.example.com/usage",
+      "env": "GATEWAY_API_KEY",
+      "auth": "bearer",
+      "metrics": [
+        {
+          "label": "Budget",
+          "kind": "pct",
+          "used": "spend.month",
+          "limit": "budget.month",
+          "resets": "budget.renews_at"
+        },
+        {
+          "label": "Balance",
+          "kind": "money",
+          "value": "credits.remaining",
+          "currency_literal": "USD"
+        }
+      ]
+    }
+  ]
+}
