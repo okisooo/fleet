@@ -121,7 +121,10 @@ machine. See [providers.example.json](providers.example.json) and
   `.cache` for source builds.
 - Claude refresh is delegated to Claude Code. Fleet does not ship copied OAuth
   client secrets.
-- Antigravity uses its local language server and short-lived local state.
+- Antigravity uses its local language server when available. If the app is closed,
+  Fleet can refresh a stored Antigravity token using OAuth metadata discovered
+  from the local installation; that metadata is never bundled, logged, or stored
+  by Fleet.
 - `--debug` prints status and exception types, never tokens or response bodies.
 
 Use Fleet only with accounts and machines you control. Review provider terms

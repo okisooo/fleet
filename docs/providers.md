@@ -28,6 +28,18 @@ Check what Fleet sees:
 Keys are read from the environment only. Fleet never writes a key to disk, never
 logs one, and the config file holds variable *names*, never secrets.
 
+### Antigravity when closed
+
+Fleet first asks a running Antigravity language server for quota. When the app is
+closed, Fleet reads the existing local OAuth state and calls Google's Code Assist
+quota service directly. If the access token has expired, Fleet discovers OAuth
+client metadata from an installed Antigravity executable, refreshes the token
+through Google's token endpoint, and keeps only the refreshed access token in
+Fleet's cache. Client metadata is not copied into the repository or persisted by
+Fleet. If Antigravity is not installed, its refresh metadata is unavailable, or
+Google revokes the refresh token, Fleet shows the last cached reading and explains
+that reconnecting Antigravity is required.
+
 ## built in
 
 Free usage endpoints — enabled as soon as the variable exists:

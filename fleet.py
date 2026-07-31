@@ -21,7 +21,7 @@ Run:  uv run --with rich python fleet.py            # live API view, 30s refresh
 Endpoints/field shapes cribbed from openusage (MIT, robinebers/openusage).
 """
 from __future__ import annotations
-import argparse, base64, concurrent.futures, email.utils, glob, json, os, re, sqlite3, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
+import argparse, base64, concurrent.futures, email.utils, glob, json, os, re, shutil, sqlite3, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -645,6 +645,7 @@ $out | ConvertTo-Json -Compress
 
 
 _AGY_SSL = None
+_AGY_OAUTH_CLIENTS = None
 
 
 def _agy_ls_call(ports, csrf, method):
@@ -673,8 +674,118 @@ def _agy_ls_call(ports, csrf, method):
     return 0, {}, None
 
 
+def _agy_cloud_call(token, method, payload):
+    """Call a Code Assist method without exposing response data in diagnostics."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "antigravity",
+    }
+    last = (0, {})
+    for host in ("https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"):
+        st, _, body = _http("POST", f"{host}/v1internal:{method}", headers, payload)
+        try:
+            result = json.loads(body) if body else {}
+        except Exception:
+            result = {}
+        last = (st, result)
+        if st == 200:
+            return last
+        if st not in (401, 403, 404):
+            break
+    return last
+
+
+def _agy_oauth_client_candidates():
+    """Discover locally installed Antigravity OAuth metadata; never persist it."""
+    global _AGY_OAUTH_CLIENTS
+    if _AGY_OAUTH_CLIENTS is not None:
+        return _AGY_OAUTH_CLIENTS
+
+    binaries = []
+    configured = os.environ.get("FLEET_ANTIGRAVITY_BIN")
+    if configured:
+        binaries.append(Path(configured))
+    for command in ("agy", "antigravity"):
+        found = shutil.which(command)
+        if found:
+            binaries.append(Path(found))
+    roots = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "antigravity",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Antigravity IDE",
+    ]
+    for root in roots:
+        if root.exists():
+            for pattern in ("language_server*.exe", "agy.exe", "antigravity*.exe"):
+                binaries.extend(root.rglob(pattern))
+
+    ids, secrets, seen = [], [], set()
+    for path in binaries:
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            blob = path.read_bytes()
+        except OSError:
+            continue
+        ids.extend(match.group(0).decode() for match in re.finditer(
+            rb"\d+-[a-z0-9]+\.apps\.googleusercontent\.com", blob
+        ))
+        secrets.extend(match.group(0).decode() for match in re.finditer(
+            rb"GOCSPX-[A-Za-z0-9_-]{28}", blob
+        ))
+
+    pairs = []
+    for client_id in reversed(list(dict.fromkeys(ids))):
+        for client_secret in reversed(list(dict.fromkeys(secrets))):
+            pair = (client_id, client_secret)
+            if pair not in pairs:
+                pairs.append(pair)
+    _AGY_OAUTH_CLIENTS = pairs
+    return pairs
+
+
+def _agy_refresh_access_token(refresh_token):
+    """Refresh via Google's installed-app endpoint using local app metadata."""
+    if not refresh_token:
+        return None
+    for client_id, client_secret in _agy_oauth_client_candidates():
+        status, _, body = _http(
+            "POST",
+            "https://oauth2.googleapis.com/token",
+            {"Accept": "application/json"},
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            form=True,
+            timeout=10,
+        )
+        try:
+            result = json.loads(body) if body else {}
+        except Exception:
+            result = {}
+        access = result.get("access_token") if status == 200 else None
+        if isinstance(access, str) and access:
+            try:
+                expires = max(60, int(result.get("expires_in", 3600)))
+            except (TypeError, ValueError):
+                expires = 3600
+            cache_put("antigravity", access, time.time() + expires)
+            return access
+        if status not in (400, 401):
+            break
+    return None
+
+
 def api_antigravity():
-    """Live quota via Antigravity's local language server, then short-lived local access token."""
+    """Live quota via local language server or refreshed local OAuth state."""
     out = dict(agent="Antigrav", plan="gemini", metrics=[], err="")
 
     ep = _agy_ls_endpoint()
@@ -693,21 +804,31 @@ def api_antigravity():
             return out
         dbg("agy ls http", st)
 
-    tok = _agy_token()  # never refresh using another application's OAuth client
+    tok = _agy_token()
     if tok:
-        for host in ("https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"):
-            st, hd, bd = _http("POST", f"{host}/v1internal:retrieveUserQuotaSummary",
-                               {"Authorization": f"Bearer {tok}", "Accept": "application/json",
-                                "User-Agent": "antigravity"}, {})
-            try:
-                j = json.loads(bd)
-            except Exception:
-                j = {}
-            mets = _agy_parse_summary(j) if st == 200 else []
+        for attempt in range(2):
+            load_status, loaded = _agy_cloud_call(
+                tok, "loadCodeAssist", {"metadata": {"ideType": "ANTIGRAVITY"}}
+            )
+            project = loaded.get("cloudaicompanionProject") if isinstance(loaded, dict) else None
+            quota_status, summary = (
+                _agy_cloud_call(tok, "retrieveUserQuotaSummary", {"project": project} if project else {})
+                if load_status == 200 else (load_status, {})
+            )
+            mets = _agy_parse_summary(summary) if quota_status == 200 else []
             if mets:
                 out["metrics"] = mets
+                tier = (loaded.get("paidTier") or {}).get("name") if isinstance(loaded, dict) else None
+                if tier:
+                    out["plan"] = str(tier)
                 _save_last("antigravity", out)
                 return out
+            if attempt == 0 and (load_status in (401, 403) or quota_status in (401, 403)):
+                _, refresh = _agy_stored_tokens()
+                tok = _agy_refresh_access_token(refresh)
+                if tok:
+                    continue
+            break
 
     last = _load_last("antigravity")  # app closed -> show last live quota with age
     if last:
@@ -761,6 +882,20 @@ def _agy_extract_tokens(raw):
 
 
 def _agy_stored_tokens():
+    for path in (
+        HOME / ".gemini" / "antigravity-cli" / "antigravity-oauth-token",
+        HOME / ".gemini" / "antigravity" / "antigravity-oauth-token",
+    ):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        token = raw.get("token") if isinstance(raw, dict) and isinstance(raw.get("token"), dict) else raw
+        if isinstance(token, dict):
+            access = token.get("access_token") or token.get("accessToken")
+            refresh = token.get("refresh_token") or token.get("refreshToken")
+            if access or refresh:
+                return access, refresh
     for db in glob.glob(str(APPDATA / "Antigravity" / "User" / "**" / "state.vscdb"), recursive=True):
         try:
             c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)

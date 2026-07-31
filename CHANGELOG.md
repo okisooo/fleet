@@ -1,6 +1,6 @@
 # changelog
 
-## 0.1.0 — unreleased
+## 0.1.0
 
 First public release.
 
@@ -8,6 +8,9 @@ First public release.
   window with live/cached freshness, usage bars and reset times.
 - Local clients: Claude Code, Codex, Grok, Antigravity, read from the credential
   state already on the machine.
+- Antigravity closed-app refresh: expired access tokens can be renewed from local
+  OAuth state without opening the IDE; Fleet does not bundle or persist vendor
+  OAuth client metadata.
 - Public API-key providers with free usage endpoints: OpenRouter, DeepSeek, Kimi
   (Moonshot), MiniMax, Z.AI, LiteLLM, plus organisation cost for OpenAI and
   Anthropic admin keys. A provider switches on when its variable exists.

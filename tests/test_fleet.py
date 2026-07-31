@@ -319,6 +319,51 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertIn('return [sys.executable, "--panel-host"]', tray_source)
 
 
+class AntigravityRefreshTests(unittest.TestCase):
+    def test_refresh_uses_runtime_client_metadata_and_fleet_cache_only(self):
+        response = json.dumps({"access_token": "fresh-access", "expires_in": 300}).encode()
+        with mock.patch.object(
+            fleet, "_agy_oauth_client_candidates", return_value=[("client", "value")]
+        ), mock.patch.object(
+            fleet, "_http", return_value=(200, {}, response)
+        ) as http, mock.patch.object(fleet, "cache_put") as cache_put:
+            self.assertEqual(fleet._agy_refresh_access_token("refresh-value"), "fresh-access")
+
+        args, kwargs = http.call_args
+        self.assertEqual(args[0:2], ("POST", "https://oauth2.googleapis.com/token"))
+        self.assertTrue(kwargs["form"])
+        self.assertEqual(args[3]["grant_type"], "refresh_token")
+        cache_put.assert_called_once()
+        self.assertEqual(cache_put.call_args.args[0], "antigravity")
+
+    def test_expired_cloud_token_refreshes_then_loads_project_before_quota(self):
+        cloud = mock.Mock(side_effect=[
+            (401, {}),
+            (200, {"cloudaicompanionProject": "project", "paidTier": {"name": "Pro"}}),
+            (200, {"groups": [{"buckets": [{
+                "bucketId": "gemini-weekly", "remainingFraction": 0.25,
+                "resetTime": "2026-08-02T00:00:00Z",
+            }]}]}),
+        ])
+        with mock.patch.object(fleet, "_agy_ls_endpoint", return_value=None), mock.patch.object(
+            fleet, "_agy_token", return_value="old-access"
+        ), mock.patch.object(
+            fleet, "_agy_stored_tokens", return_value=("old-access", "refresh-value")
+        ), mock.patch.object(
+            fleet, "_agy_refresh_access_token", return_value="new-access"
+        ) as refresh, mock.patch.object(fleet, "_agy_cloud_call", cloud), mock.patch.object(
+            fleet, "_save_last"
+        ):
+            out = fleet.api_antigravity()
+
+        refresh.assert_called_once_with("refresh-value")
+        self.assertEqual(cloud.call_args_list[1].args[0], "new-access")
+        self.assertEqual(cloud.call_args_list[2].args[2], {"project": "project"})
+        self.assertEqual(out["plan"], "Pro")
+        self.assertEqual(out["metrics"][0]["label"], "Weekly")
+        self.assertEqual(out["metrics"][0]["pct"], 75.0)
+
+
 OPENROUTER_PAYLOAD = {
     "data": {
         "label": "sk-or-v1-...",
