@@ -14,7 +14,18 @@ clients; vendor endpoints and response formats can change without notice.
 Fleet is an independent project. It is not affiliated with Anthropic, OpenAI,
 xAI, Google, Claude Code, Codex, Grok, or Antigravity.
 
-## install
+## easy install
+
+Download `Fleet-Setup-<version>.exe` from the project's GitHub Releases page,
+run it, and optionally tick **Start Fleet when I sign in**. Fleet then appears in
+the notification area; left-click toggles the flyout and right-click offers refresh
+or quit. No Python or terminal is needed.
+
+The installer is per-user and stores runtime state in `%LOCALAPPDATA%\\Fleet`.
+It does not install any provider CLI or sign you in for you: install and sign in to
+the provider apps you want Fleet to display first.
+
+## from source
 
 Requirements: Windows 11, Python 3.13+, and whichever provider CLIs you want to
 inspect.
@@ -28,6 +39,14 @@ py -3.13 -m venv .venv
 ```
 
 Left-click the tray icon to toggle the flyout. Right-click for refresh and quit.
+
+## releases
+
+Maintainers can build a portable app and installer with the **release build**
+GitHub workflow. It runs the test suite first, uploads both artifacts for manual
+runs, and publishes them automatically only for a `v*` version tag. Releases are
+unsigned until the project obtains a Windows code-signing certificate; Windows may
+show a reputation warning for an unsigned first release.
 
 ## privacy and credential behavior
 

@@ -1,0 +1,48 @@
+name: release build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 0.1.0
+        required: true
+        type: string
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Build portable app
+        shell: pwsh
+        run: .\scripts\build-release.ps1 -Version "${{ inputs.version || github.ref_name }}"
+      - name: Build installer
+        shell: pwsh
+        env:
+          FLEET_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          choco install innosetup --no-progress -y
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Fleet.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fleet-windows
+          path: |
+            dist/*-portable.zip
+            dist/Fleet-Setup-*.exe
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*-portable.zip
+            dist/Fleet-Setup-*.exe

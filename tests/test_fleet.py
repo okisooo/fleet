@@ -305,6 +305,15 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertNotIn('dbg("claude refresh http", st, bd', source)
         self.assertNotIn('dbg("grok refresh http", st, bd', source)
 
+    def test_packaged_app_keeps_data_outside_the_install_folder(self):
+        source = Path(fleet.__file__).read_text(encoding="utf-8")
+        tray_source = Path(tray.__file__).read_text(encoding="utf-8")
+        root = 'Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Fleet"'
+
+        self.assertIn(root, source)
+        self.assertIn(root, tray_source)
+        self.assertIn('return [sys.executable, "--panel-host"]', tray_source)
+
 
 class TrayAnchorTests(unittest.TestCase):
     def test_show_signal_carries_the_notification_icon_rectangle(self):

@@ -20,11 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleet
 
 HERE = Path(__file__).resolve().parent
-STATE = HERE / ".cache" / "state.json"
+_BUNDLED = bool(getattr(sys, "frozen", False))
+DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Fleet" if _BUNDLED else HERE
+CACHE = DATA_ROOT / ".cache"
+STATE = CACHE / "state.json"
 PYW = HERE / ".venv" / "Scripts" / "pythonw.exe"
-PANEL_PID = HERE / ".cache" / "panel-host.pid"
-PANEL_SIGNAL = HERE / ".cache" / "panel.show"
-PANEL_QUIT = HERE / ".cache" / "panel.quit"
+PANEL_PID = CACHE / "panel-host.pid"
+PANEL_SIGNAL = CACHE / "panel.show"
+PANEL_QUIT = CACHE / "panel.quit"
 REFRESH_SECS = 90
 CYCLE_SECS = 2
 SHORT = {"Claude": "CL", "Codex": "CX", "Grok": "GR", "Antigrav": "AG"}
@@ -113,6 +116,14 @@ def _write_panel_signal(icon=None):
         "anchor": list(anchor) if anchor else None,
     }
     PANEL_SIGNAL.write_text(json.dumps(payload))
+
+
+def _panel_host_command():
+    """Run the bundled executable again, or the source script in development."""
+    if _BUNDLED:
+        return [sys.executable, "--panel-host"]
+    exe = str(PYW) if PYW.exists() else "pythonw"
+    return [exe, str(HERE / "tray.py"), "--panel-host"]
 
 
 def worst_pct(data):
@@ -439,9 +450,8 @@ def ensure_panel_host(show=False, icon=None):
             PANEL_SIGNAL.unlink()
         except OSError:
             pass
-    exe = str(PYW) if PYW.exists() else "pythonw"
     subprocess.Popen(
-        [exe, str(HERE / "tray.py"), "--panel-host"],
+        _panel_host_command(),
         creationflags=0x08000000,
     )
     if show:
@@ -540,6 +550,7 @@ def loop(icon):
 
 def main():
     global _data
+    CACHE.mkdir(parents=True, exist_ok=True)
     if "--panel" in sys.argv:
         run_panel()
         return

@@ -11,7 +11,8 @@ Token handling:
   * Reads credentials only from local CLI/app state.
   * Claude refreshes through Claude Code first; Grok may atomically update its
     own CLI credential file when its provider rotates a token.
-  * Runtime cache stays in ./.cache (ignored by Git). Tokens never enter logs.
+  * Runtime cache stays in ./.cache during development and LocalAppData\\Fleet
+    when packaged. Tokens never enter logs.
 
 Run:  uv run --with rich python fleet.py            # live API view, 30s refresh
       uv run --with rich python fleet.py --once
@@ -32,7 +33,9 @@ for _s in (sys.stdout, sys.stderr):  # Windows consoles default to cp932/cp1252
 
 HOME = Path(os.path.expanduser("~"))
 APPDATA = Path(os.path.expandvars("%APPDATA%"))
-CACHE = Path(__file__).resolve().parent / ".cache"
+_BUNDLED = bool(getattr(sys, "frozen", False))
+_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Fleet" if _BUNDLED else Path(__file__).resolve().parent
+CACHE = _ROOT / ".cache"
 CACHE.mkdir(exist_ok=True)
 DEBUG = False
 REFRESH = False  # Codex-only opt-in refresh; may rotate its CLI token

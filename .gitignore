@@ -1,6 +1,7 @@
 # local runtime state and credentials
 .cache/
 .venv/
+.build-venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -25,5 +26,7 @@ HANDOFF.md
 # never commit build products or symbol files
 bin/
 obj/
+build/
+dist/
 *.dll
 *.pdb
