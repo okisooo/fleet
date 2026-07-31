@@ -8,6 +8,12 @@ yourself.
 Fleet stays in the notification area, cycles provider status in its icon, and
 opens a compact flyout with live/cached freshness, usage bars, and reset times.
 
+<img src="docs/screenshot.png" alt="The Fleet flyout: one row per usage window, with bars, reset times and freshness" width="280">
+
+Every row is a real quota window. Green means the reading is live, amber means it
+is the last cached one and how old it is — above, Antigravity was closed, so its
+numbers are five hours old while the rest are current.
+
 ## status
 
 Windows-only experimental project. It works with locally installed provider
@@ -41,7 +47,7 @@ Requirements: Windows 11, Python 3.13+, and whichever provider CLIs you want to
 inspect.
 
 ```powershell
-git clone <your-repository-url> fleet
+git clone https://github.com/okisooo/fleet.git
 cd fleet
 py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt

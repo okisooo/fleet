@@ -22,6 +22,22 @@ py -3.13 -m venv .venv
 `tray.py --dry` prints one line per provider without opening any window, which is
 the fastest way to check a data change. `fleet.py --debug` prints status codes and
 exception types only; it must never print tokens or response bodies.
+`fleet.py --providers` shows which API-key providers are wired up.
+
+## adding a provider
+
+Most providers need no Python: they are one spec in `apikeys.py` — a URL, the
+environment variable holding the key, and dotted paths to the numbers. See
+[docs/providers.md](docs/providers.md) for the mapping language, and add a test
+with a recorded payload rather than a live call.
+
+Rules for a new built-in:
+
+- Only documented endpoints, or clearly marked experimental ones. No scraping a
+  logged-in console session, and no cookies.
+- If reading usage costs money, it belongs behind `probe`, off by default.
+- Keys come from the environment. Never read one from a config file or write one
+  anywhere.
 
 ## pull requests
 
