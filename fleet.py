@@ -36,7 +36,9 @@ APPDATA = Path(os.path.expandvars("%APPDATA%"))
 _BUNDLED = bool(getattr(sys, "frozen", False))
 _ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Fleet" if _BUNDLED else Path(__file__).resolve().parent
 CACHE = _ROOT / ".cache"
-CACHE.mkdir(exist_ok=True)
+# parents=True: a portable (unzipped) build is the first thing to create
+# LocalAppData\Fleet, so the parent does not exist yet on a clean machine.
+CACHE.mkdir(parents=True, exist_ok=True)
 DEBUG = False
 REFRESH = False  # Codex-only opt-in refresh; may rotate its CLI token
 

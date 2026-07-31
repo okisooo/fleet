@@ -1,0 +1,2 @@
+# Packaging-only dependencies. Pinned so a release build is reproducible.
+pyinstaller==6.21.0

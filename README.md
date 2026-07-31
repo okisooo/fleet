@@ -21,8 +21,16 @@ run it, and optionally tick **Start Fleet when I sign in**. Fleet then appears i
 the notification area; left-click toggles the flyout and right-click offers refresh
 or quit. No Python or terminal is needed.
 
-The installer is per-user and stores runtime state in `%LOCALAPPDATA%\\Fleet`.
-It does not install any provider CLI or sign you in for you: install and sign in to
+The installer is per-user (no admin prompt), installs to `%LOCALAPPDATA%\Fleet`,
+and keeps runtime state in `%LOCALAPPDATA%\Fleet\.cache`. Uninstalling removes
+both. Quit Fleet from the tray before installing an update: Setup will otherwise
+ask you to close it.
+
+A portable ZIP is published alongside the installer. Unzip it anywhere and run
+`Fleet.exe`; it uses the same `%LOCALAPPDATA%\Fleet` state directory and adds no
+Start menu or startup entry.
+
+Fleet does not install any provider CLI or sign you in: install and sign in to
 the provider apps you want Fleet to display first.
 
 ## from source
@@ -40,13 +48,24 @@ py -3.13 -m venv .venv
 
 Left-click the tray icon to toggle the flyout. Right-click for refresh and quit.
 
+A source checkout keeps its state in the repository's own `.cache\`, which is
+ignored by Git.
+
+```powershell
+.\.venv\Scripts\python.exe tray.py --dry   # one line per provider, no window
+.\.venv\Scripts\python.exe fleet.py --once # full terminal view (needs `rich`)
+```
+
 ## releases
 
-Maintainers can build a portable app and installer with the **release build**
+Maintainers build a portable app and installer with the **release build**
 GitHub workflow. It runs the test suite first, uploads both artifacts for manual
-runs, and publishes them automatically only for a `v*` version tag. Releases are
-unsigned until the project obtains a Windows code-signing certificate; Windows may
-show a reputation warning for an unsigned first release.
+runs, and publishes them automatically only for a `v*` version tag. Local build
+steps are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Releases are unsigned until the project obtains a Windows code-signing
+certificate, so Windows SmartScreen can warn about an unrecognised app the first
+time a release is run. Verify the download came from the project's Releases page.
 
 ## privacy and credential behavior
 
@@ -73,8 +92,11 @@ before using undocumented usage endpoints.
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+Contribution and local packaging instructions: [CONTRIBUTING.md](CONTRIBUTING.md).
+
 The project deliberately uses original provider monograms instead of vendor
-logos, so the repository does not redistribute third-party artwork.
+logos, so the repository does not redistribute third-party artwork. The app icon
+is generated at build time by `scripts/build_assets.py`.
 
 ## security
 

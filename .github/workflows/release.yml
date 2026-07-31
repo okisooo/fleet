@@ -11,28 +11,42 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   package:
     runs-on: windows-latest
+    permissions:
+      contents: write # only used by the tag-gated publish step below
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Resolve version
+        id: meta
+        shell: pwsh
+        run: |
+          $raw = "${{ inputs.version || github.ref_name }}"
+          "version=$($raw -replace '^[vV]', '')" >> $env:GITHUB_OUTPUT
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
       - name: Build portable app
         shell: pwsh
-        run: .\scripts\build-release.ps1 -Version "${{ inputs.version || github.ref_name }}"
+        run: .\scripts\build-release.ps1 -Version "${{ steps.meta.outputs.version }}"
       - name: Build installer
         shell: pwsh
         env:
-          FLEET_VERSION: ${{ inputs.version || github.ref_name }}
+          FLEET_VERSION: ${{ steps.meta.outputs.version }}
+          FLEET_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           choco install innosetup --no-progress -y
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Fleet.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed." }
       - uses: actions/upload-artifact@v4
         with:
           name: Fleet-windows

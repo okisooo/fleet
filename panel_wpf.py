@@ -14,7 +14,10 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 
-WPF = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF")
+WPF = (
+    Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    / r"Microsoft.NET\Framework64\v4.0.30319\WPF"
+)
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_ROUND = 2

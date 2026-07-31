@@ -1,5 +1,8 @@
 import base64
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -313,6 +316,68 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertIn(root, source)
         self.assertIn(root, tray_source)
         self.assertIn('return [sys.executable, "--panel-host"]', tray_source)
+
+
+class PackagingTests(unittest.TestCase):
+    REPO = Path(__file__).resolve().parent.parent
+
+    def test_packaged_start_creates_its_data_root_from_nothing(self):
+        """A portable build is the first thing to create LocalAppData\\Fleet."""
+        with tempfile.TemporaryDirectory() as temp:
+            env = dict(os.environ, LOCALAPPDATA=temp, PYTHONPATH=str(self.REPO))
+            proc = subprocess.run(
+                [sys.executable, "-c", "import sys; sys.frozen = True; import fleet"],
+                capture_output=True,
+                env=env,
+                text=True,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue((Path(temp) / "Fleet" / ".cache").is_dir())
+
+    def test_release_build_strips_the_tag_v_prefix(self):
+        script = (self.REPO / "scripts" / "build-release.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$Version = $Version -replace '^[vV]', ''", script)
+
+    def test_installer_guards_a_running_tray_and_removes_cached_state(self):
+        setup = (self.REPO / "installer" / "Fleet.iss").read_text(encoding="utf-8")
+
+        self.assertIn("AppMutex=Local\\fleet-tray", setup)
+        self.assertIn('Type: filesandordirs; Name: "{app}\\.cache"', setup)
+
+    def test_single_instance_uses_the_mutex_the_installer_waits_on(self):
+        tray_source = Path(tray.__file__).read_text(encoding="utf-8")
+
+        self.assertIn(r'claim_single_instance(r"Local\fleet-tray")', tray_source)
+
+    def test_generated_icon_carries_every_shell_size(self):
+        sys.path.insert(0, str(self.REPO / "scripts"))
+        try:
+            import build_assets
+        finally:
+            sys.path.pop(0)
+
+        with tempfile.TemporaryDirectory() as temp:
+            icon = Path(temp) / "fleet.ico"
+            build_assets.write_icon(icon)
+            from PIL import Image
+
+            with Image.open(icon) as img:
+                sizes = {size for size in img.info["sizes"]}
+
+        self.assertEqual(sizes, {(s, s) for s in build_assets.ICON_SIZES})
+
+    def test_version_resource_accepts_a_tag_shaped_version(self):
+        sys.path.insert(0, str(self.REPO / "scripts"))
+        try:
+            import build_assets
+        finally:
+            sys.path.pop(0)
+
+        self.assertEqual(build_assets._quad("v0.1.0"), (0, 1, 0, 0))
+        self.assertEqual(build_assets._quad("1.2.3.4"), (1, 2, 3, 4))
+        self.assertEqual(build_assets._quad("dev"), (0, 0, 0, 0))
 
 
 class TrayAnchorTests(unittest.TestCase):
