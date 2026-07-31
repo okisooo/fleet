@@ -28,5 +28,6 @@ bin/
 obj/
 build/
 dist/
+*.spec
 *.dll
 *.pdb
