@@ -1,5 +1,27 @@
 # changelog
 
+## 0.2.0 - 2026-08-07
+
+- Rebuilt the flyout around spacious provider cards, full-width quota meters,
+  clearer reset metadata, and a calmer blue/amber/coral pressure scale.
+- Collapsed repeated zero-use quota windows behind an accessible disclosure and
+  gave Antigravity's Gemini and Claude windows distinct labels.
+- Replaced tiny tray rings with full-bleed provider tiles and a four-pixel bottom
+  usage meter that remains legible at Windows' 16-pixel notification size.
+- Kept balance-only providers out of the tray cycle; OpenRouter now prefers the
+  account credit balance and falls back to regular-key budget and spend.
+- Cleaned up Codex's optional Spark and credit rows, and reduced repeated Grok
+  authentication pressure with a short successful-reading cache.
+- Made API keys written with `setx` discoverable without restarting Fleet.
+- Hardened the solid-window fallback for systems where acrylic is unavailable.
+- Bundled the provider identification artwork and its third-party notice in both
+  portable and installed releases.
+
+## 0.1.1 - 2026-07-31
+
+- Refreshed expired Antigravity quota tokens from local installation metadata
+  while the Antigravity app is closed.
+
 ## 0.1.0
 
 First public release.

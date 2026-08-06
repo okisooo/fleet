@@ -427,6 +427,30 @@ def _window_label(window, fallback="Usage"):
     return fallback
 
 
+def _codex_additional_limit_metric(limit):
+    """Return a useful optional Codex limit, omitting placeholders with no usage."""
+    used_percent = limit.get("used_percent")
+    if used_percent is None:
+        return None
+    raw_label = str(limit.get("name") or limit.get("limit_name") or "extra")
+    label = "Spark" if "codex-spark" in raw_label.casefold() else raw_label
+    reset_at = limit.get("reset_at") or (
+        time.time() + (limit.get("reset_after_seconds", 0) or 0)
+    )
+    return M(label, used_percent, reset_at)
+
+
+def _codex_credit_metric(balance):
+    """Show Codex credits only when there is a positive balance to report."""
+    try:
+        amount = float(balance or 0)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+    return M("Credits", None, None, f"${balance}")
+
+
 def api_codex():
     out = dict(agent="Codex", plan="", metrics=[], err="")
     tok = acct = None
@@ -480,12 +504,15 @@ def api_codex():
                     or (time.time() + window.get("reset_after_seconds", 0)),
                 )
             )
-    for w in (j.get("additional_rate_limits") or []):
-        out["metrics"].append(M(w.get("name") or w.get("limit_name") or "extra", w.get("used_percent"),
-                                w.get("reset_at") or (time.time() + (w.get("reset_after_seconds", 0) or 0))))
+    for limit in (j.get("additional_rate_limits") or []):
+        metric = _codex_additional_limit_metric(limit)
+        if metric:
+            out["metrics"].append(metric)
     cr = j.get("credits") or {}
     if cr:
-        out["metrics"].append(M("Credits", None, None, f"${cr.get('balance',0)}"))
+        metric = _codex_credit_metric(cr.get("balance"))
+        if metric:
+            out["metrics"].append(metric)
     _save_last("codex", out)
     return out
 
@@ -502,6 +529,17 @@ def _refresh_codex(rt):
 
 def api_grok():
     out = dict(agent="Grok", plan="", metrics=[], err="")
+    # Soft-cache successful readings so tray polls do not re-hit cli-chat-proxy every cycle.
+    # This reduces auth pressure on the same Grok account used by CLIProxyAPI/Codex.
+    last = _load_last("grok", max_age=180)
+    if last:
+        mets, plan, _age, _ts = last
+        if mets:
+            out["metrics"] = mets
+            out["plan"] = plan
+            out["err"] = "soft cache"
+            out["cached_at"] = _ts
+            return out
     try:
         auth = json.loads((HOME / ".grok" / "auth.json").read_text())
     except Exception as e:
@@ -1138,7 +1176,7 @@ def print_providers():
                  for i, entry in enumerate(config.get("custom") or [])):
         if spec:
             print(f"ON  {spec['id']:<16} {' or '.join(spec['env']) or '-':<44} custom entry")
-    print("\nSet the variable, then restart Fleet. Probes need \"probe\": true in the config.")
+    print("\nSet the variable, then refresh Fleet. Probes need \"probe\": true in the config.")
 
 
 def table_logs(rows):

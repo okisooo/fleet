@@ -43,6 +43,8 @@ SetupIconFile={#AppIcon}
 
 [Files]
 Source: "..\dist\Fleet.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autostartup}\Fleet"; Filename: "{app}\Fleet.exe"; Tasks: startup

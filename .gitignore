@@ -18,9 +18,11 @@ _*.png
 .pytest_cache/
 secrets-scan.json
 
-# retired local prototype and unlicensed vendor artwork
+# retired local prototype; only documented provider identifiers are versioned
 native/
-assets/
+assets/*
+!assets/providers/
+!assets/providers/**
 
 # internal project notes; public docs live at the repository root
 HANDOFF.md

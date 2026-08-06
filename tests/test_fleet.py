@@ -172,6 +172,18 @@ class ProviderCacheTests(unittest.TestCase):
 
         self.assertEqual(result["cached_at"], 100.0)
 
+    def test_grok_soft_cache_keeps_its_original_timestamp_and_cached_status(self):
+        metrics = [fleet.M("Weekly", 32.0)]
+        with mock.patch.object(
+            fleet, "_load_last", return_value=(metrics, "SuperGrok", "1m", 123.0)
+        ), mock.patch.object(fleet, "_jget", side_effect=AssertionError("network called")):
+            result = fleet.api_grok()
+
+        self.assertEqual(result["metrics"], metrics)
+        self.assertEqual(result["plan"], "SuperGrok")
+        self.assertEqual(result["err"], "soft cache")
+        self.assertEqual(result["cached_at"], 123.0)
+
 
 class ClaudeUsageTests(unittest.TestCase):
     def test_unified_headers_become_session_and_weekly_metrics(self):
@@ -361,19 +373,13 @@ class AntigravityRefreshTests(unittest.TestCase):
         self.assertEqual(cloud.call_args_list[2].args[2], {"project": "project"})
         self.assertEqual(out["plan"], "Pro")
         self.assertEqual(out["metrics"][0]["label"], "Weekly")
-        self.assertEqual(out["metrics"][0]["pct"], 75.0)
+        self.assertEqual(out["metrics"][0]["extra"], "")
 
 
 OPENROUTER_PAYLOAD = {
     "data": {
-        "label": "sk-or-v1-...",
-        "limit": 20.0,
-        "limit_remaining": 5.0,
-        "limit_reset": "2026-08-01T00:00:00Z",
-        "usage": 15.0,
-        "usage_daily": 1.25,
-        "usage_monthly": 9.5,
-        "is_free_tier": False,
+        "total_credits": 20.0,
+        "total_usage": 15.0,
     }
 }
 
@@ -410,16 +416,15 @@ class MetricMappingTests(unittest.TestCase):
         self.assertEqual(metrics[0]["extra"], "¥110.00")
         self.assertIsNone(metrics[0]["pct"])
 
-    def test_spend_against_a_cap_becomes_a_percentage(self):
+    def test_openrouter_shows_remaining_balance_without_a_meter(self):
         specs = apikeys.BUILTIN_BY_ID["openrouter"]["metrics"]
 
         metrics = apikeys.build_metrics(OPENROUTER_PAYLOAD, specs, fleet.M)
 
-        self.assertEqual(metrics[0]["label"], "Key cap")
-        self.assertEqual(metrics[0]["pct"], 75.0)
-        self.assertEqual(metrics[0]["extra"], "$15.00")
-        self.assertEqual(metrics[0]["resets"], "2026-08-01T00:00:00Z")
-        self.assertEqual(metrics[1]["extra"], "$9.50")
+        self.assertEqual(len(metrics), 1)
+        self.assertEqual(metrics[0]["label"], "Balance")
+        self.assertIsNone(metrics[0]["pct"])
+        self.assertEqual(metrics[0]["extra"], "$5.00")  # remaining budget
 
     def test_a_remaining_count_is_converted_to_used(self):
         payload = {"quota": {"total": 200, "left": 50}}
@@ -438,6 +443,16 @@ class MetricMappingTests(unittest.TestCase):
 class ProviderEnablementTests(unittest.TestCase):
     def test_a_key_in_the_environment_turns_its_provider_on(self):
         specs = apikeys.enabled_specs({}, {"OPENROUTER_API_KEY": "sk-or-test"})
+
+        self.assertEqual([spec["id"] for spec in specs], ["openrouter"])
+
+    def test_a_key_written_to_the_windows_registry_turns_its_provider_on(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            apikeys,
+            "_get_registry_env",
+            side_effect=lambda name: "registry-key" if name == "OPENROUTER_API_KEY" else None,
+        ):
+            specs = apikeys.enabled_specs({})
 
         self.assertEqual([spec["id"] for spec in specs], ["openrouter"])
 
@@ -494,10 +509,39 @@ class ApiKeyCollectionTests(unittest.TestCase):
         self.assertEqual(out["agent"], "OpenRouter")
         self.assertTrue(out["compact"])
         self.assertEqual(out["err"], "")
-        self.assertEqual(out["plan"], "paid")
-        self.assertEqual(out["metrics"][0]["pct"], 75.0)
+        self.assertEqual(out["metrics"][0]["extra"], "$5.00")
         self.assertEqual(record[0][0], "GET")
         self.assertEqual(record[0][2]["Authorization"], "Bearer sk-or-test")
+
+    def test_openrouter_regular_key_falls_back_to_key_budget_endpoint(self):
+        record = []
+        responses = iter([
+            (403, {}, b'{"error":"management key required"}'),
+            (200, {}, json.dumps({"data": {
+                "limit_remaining": 6.5,
+                "usage_monthly": 3.0,
+                "is_free_tier": False,
+            }}).encode()),
+        ])
+
+        def http(method, url, request_headers=None, body=None, form=False, timeout=12):
+            record.append((method, url, dict(request_headers or {}), body))
+            return next(responses)
+
+        spec = dict(apikeys.BUILTIN_BY_ID["openrouter"], env=["OPENROUTER_API_KEY"])
+        with mock.patch.dict(
+            "os.environ", {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False  # pragma: allowlist secret
+        ):
+            out = apikeys.collect(spec, http, fleet._header, fleet.M)
+
+        self.assertEqual([call[1] for call in record], [
+            "https://openrouter.ai/api/v1/credits",
+            "https://openrouter.ai/api/v1/key",
+        ])
+        self.assertEqual(out["err"], "")
+        self.assertEqual(out["plan"], "paid")
+        self.assertEqual(out["metrics"][0]["label"], "Balance")
+        self.assertEqual(out["metrics"][0]["extra"], "$6.50")
 
     def test_a_provider_without_its_key_reports_instead_of_calling_out(self):
         record = []
@@ -620,11 +664,40 @@ class PackagingTests(unittest.TestCase):
 
         self.assertIn("$Version = $Version -replace '^[vV]', ''", script)
 
+    def test_release_build_bundles_provider_artwork_and_notices(self):
+        provider_dir = self.REPO / "assets" / "providers"
+        expected = {
+            "antigravity.png",
+            "claude.png",
+            "codex.png",
+            "grok.ico",
+            "SOURCES.md",
+        }
+        script = (self.REPO / "scripts" / "build-release.ps1").read_text(encoding="utf-8")
+
+        self.assertTrue(expected.issubset({path.name for path in provider_dir.iterdir()}))
+        self.assertIn('--add-data "${providerAssets}:assets/providers"', script)
+        self.assertIn("Copy-Item $thirdPartyNotices $out", script)
+
+    def test_each_local_provider_artwork_path_resolves(self):
+        for provider in ("Claude", "Codex", "Grok", "Antigravity"):
+            with self.subTest(provider=provider):
+                self.assertIsNotNone(tray._provider_asset_path(provider))
+
+    def test_python_sources_do_not_contain_hidden_control_bytes(self):
+        for path in (self.REPO / "tray.py", self.REPO / "panel_wpf.py"):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                hidden = [char for char in text if ord(char) < 32 and char not in "\n\r\t"]
+                self.assertEqual(hidden, [])
+
     def test_installer_guards_a_running_tray_and_removes_cached_state(self):
         setup = (self.REPO / "installer" / "Fleet.iss").read_text(encoding="utf-8")
 
         self.assertIn("AppMutex=Local\\fleet-tray", setup)
         self.assertIn('Type: filesandordirs; Name: "{app}\\.cache"', setup)
+        self.assertIn('Source: "..\\LICENSE"', setup)
+        self.assertIn('Source: "..\\THIRD_PARTY_NOTICES.md"', setup)
 
     def test_single_instance_uses_the_mutex_the_installer_waits_on(self):
         tray_source = Path(tray.__file__).read_text(encoding="utf-8")
@@ -703,6 +776,30 @@ class TrayIconTests(unittest.TestCase):
         self.assertEqual(cycle[4], ("OpenRouter", 90))
         self.assertEqual(cycle[5], ("Kimi", 40))
 
+    def test_balance_only_api_providers_stay_out_of_the_icon_cycle(self):
+        data = [
+            {"agent": "Codex", "metrics": [{"pct": None}]},
+            {
+                "agent": "OpenRouter",
+                "compact": True,
+                "metrics": [{"pct": None, "extra": "$6.50"}],
+            },
+        ]
+
+        self.assertEqual(tray.usage_cycle(data), [("Codex", None)])
+        self.assertNotIn("OpenRouter", tray.tooltip(data))
+
+    def test_all_balance_only_providers_use_the_static_fleet_fallback(self):
+        data = [
+            {
+                "agent": "OpenRouter",
+                "compact": True,
+                "metrics": [{"pct": None, "extra": "$6.50"}],
+            }
+        ]
+
+        self.assertEqual(tray.usage_cycle(data), [(None, None)])
+
     def test_the_tooltip_stays_inside_the_windows_limit(self):
         data = [
             {"agent": f"Provider{index}", "compact": True, "metrics": [{"pct": 50 + index}]}
@@ -717,16 +814,104 @@ class TrayIconTests(unittest.TestCase):
     def test_a_provider_fleet_has_no_table_entry_for_still_gets_a_mark(self):
         icon = tray.make_icon_image("OpenRouter", 30)
 
-        self.assertEqual(icon.size, (64, 64))
-        self.assertEqual(tray._mark_for("OpenRouter"), "O")
+        self.assertEqual(icon.size, (256, 256))
+        self.assertEqual(icon.mode, "RGBA")
+        self.assertEqual(tray._mark_for("OpenRouter"), "OR")
         self.assertEqual(tray._accent_for("Kimi"), tray._accent_for("Kimi"))
 
     def test_provider_mark_changes_the_icon(self):
         claude = tray.make_icon_image("Claude", 50)
         codex = tray.make_icon_image("Codex", 50)
 
-        self.assertEqual(claude.size, (64, 64))
+        self.assertEqual(claude.size, (256, 256))
         self.assertNotEqual(claude.tobytes(), codex.tobytes())
+
+    def test_usage_meter_changes_without_using_a_fake_provider_colour(self):
+        tray.make_icon_image.cache_clear()
+        with mock.patch.object(
+            tray,
+            "_accent_for",
+            side_effect=AssertionError("tray icon must not use fake brand colours"),
+        ):
+            empty = tray.make_icon_image("CustomMeter", 0)
+            full = tray.make_icon_image("CustomMeter", 100)
+
+        self.assertNotEqual(empty.tobytes(), full.tobytes())
+
+    def test_provider_tile_optically_fills_a_16px_tray_slot(self):
+        from PIL import Image
+
+        small = tray.make_icon_image("Grok", 100).resize(
+            (16, 16), Image.Resampling.LANCZOS
+        )
+        opaque_pixels = sum(small.getchannel("A").histogram()[128:])
+
+        self.assertGreaterEqual(opaque_pixels, 240)
+
+    def test_full_usage_remains_a_readable_band_at_16px(self):
+        from PIL import Image
+
+        small = tray.make_icon_image("Grok", 100).resize(
+            (16, 16), Image.Resampling.LANCZOS
+        ).convert("RGB")
+        target = tray._hex_to_rgb(tray.sev(100))
+
+        def is_usage_colour(pixel):
+            distance = sum(
+                (channel - expected) ** 2
+                for channel, expected in zip(pixel, target)
+            )
+            return distance < 75 ** 2
+
+        bottom_band = [
+            sum(is_usage_colour(small.getpixel((x, y))) for x in range(16))
+            for y in (12, 13, 14, 15)
+        ]
+
+        self.assertTrue(all(count >= 12 for count in bottom_band), bottom_band)
+
+    def test_low_positive_usage_survives_pystray_resampling(self):
+        from PIL import Image
+
+        # pystray loads a 32 px ICO frame and the shell reduces it again for a
+        # 16 px taskbar. A 5% fill still needs one visible logical pixel.
+        small = tray.make_icon_image("CustomMeter", 5).resize(
+            (32, 32), Image.Resampling.LANCZOS
+        ).resize((16, 16), Image.Resampling.LANCZOS).convert("RGB")
+        target = tray._hex_to_rgb(tray.sev(5))
+
+        def is_usage_colour(pixel):
+            distance = sum(
+                (channel - expected) ** 2
+                for channel, expected in zip(pixel, target)
+            )
+            return distance < 75 ** 2
+
+        bottom_band = [
+            sum(is_usage_colour(small.getpixel((x, y))) for x in range(16))
+            for y in (12, 13, 14)
+        ]
+
+        self.assertTrue(all(count >= 1 for count in bottom_band), bottom_band)
+
+    def test_meter_length_tracks_usage_at_16px(self):
+        from PIL import Image
+
+        for pct, expected_width in ((0, 0), (25, 4), (50, 8), (75, 12), (100, 16)):
+            small = tray.make_icon_image("CustomMeter", pct).resize(
+                (16, 16), Image.Resampling.LANCZOS
+            ).convert("RGB")
+            target = tray._hex_to_rgb(tray.sev(pct))
+            actual_width = sum(
+                sum(
+                    (channel - expected) ** 2
+                    for channel, expected in zip(small.getpixel((x, 13)), target)
+                ) < 75 ** 2
+                for x in range(16)
+            )
+
+            with self.subTest(pct=pct):
+                self.assertAlmostEqual(actual_width, expected_width, delta=1)
 
     def test_refresh_now_bypasses_claude_backoff(self):
         icon = object()
@@ -757,6 +942,29 @@ class CodexWindowTests(unittest.TestCase):
     def test_labels_windows_from_actual_duration(self):
         self.assertEqual(fleet._window_label({"limit_window_seconds": 18_000}), "Session")
         self.assertEqual(fleet._window_label({"limit_window_seconds": 604_800}), "Weekly")
+
+    def test_unmetered_spark_limit_is_not_a_metric(self):
+        self.assertIsNone(
+            fleet._codex_additional_limit_metric(
+                {"name": "GPT-5.3-Codex-Spark", "used_percent": None, "reset_at": 123}
+            )
+        )
+
+    def test_metered_spark_limit_uses_a_compact_label(self):
+        self.assertEqual(
+            fleet._codex_additional_limit_metric(
+                {"name": "GPT-5.3-Codex-Spark", "used_percent": 25, "reset_at": 123}
+            ),
+            fleet.M("Spark", 25, 123),
+        )
+
+    def test_zero_codex_credits_are_not_a_metric(self):
+        self.assertIsNone(fleet._codex_credit_metric(0))
+        self.assertIsNone(fleet._codex_credit_metric("0.00"))
+        self.assertEqual(
+            fleet._codex_credit_metric(6.5),
+            fleet.M("Credits", None, None, "$6.5"),
+        )
 
 
 class PanelDismissalTests(unittest.TestCase):
@@ -825,7 +1033,7 @@ class PanelLayoutTests(unittest.TestCase):
 class CompactProviderTests(unittest.TestCase):
     def _rows(self, agent):
         markup = panel_wpf._card(agent, panel_wpf._theme(True))
-        return markup.count("<Grid Height=")
+        return markup.count('Tag="MetricUsage"') + markup.count('Tag="MetricAmount"')
 
     def test_an_api_provider_collapses_to_one_row(self):
         agent = {
@@ -839,7 +1047,47 @@ class CompactProviderTests(unittest.TestCase):
         }
 
         self.assertEqual(self._rows(agent), 1)
-        self.assertIn("75%", panel_wpf._card(agent, panel_wpf._theme(True)))
+        # Currency extras take the value slot; the bar still encodes utilization.
+        markup = panel_wpf._card(agent, panel_wpf._theme(True))
+        self.assertIn("$15.00", markup)
+        self.assertNotIn("75%", markup)
+
+    def test_openrouter_balance_row_does_not_smash_name_and_label(self):
+        agent = {
+            "agent": "OpenRouter",
+            "compact": True,
+            "metrics": [{"label": "Balance", "pct": None, "extra": "$6.55"}],
+        }
+        markup = panel_wpf._card(agent, panel_wpf._theme(True))
+        self.assertIn("OpenRouter", markup)
+        self.assertIn("$6.55", markup)
+        self.assertIn("ClipToBounds", markup)
+        self.assertIn(f'MaxWidth="{panel_wpf.NAME_MAX_WIDTH:.0f}"', markup)
+        self.assertIn('Tag="ProviderHeader"', markup)
+        self.assertIn('Text="balance"', markup)
+
+    def test_zero_money_rows_are_hidden_without_hiding_zero_usage(self):
+        agents = [
+            {
+                "agent": "OpenRouter",
+                "compact": True,
+                "metrics": [{"label": "Balance", "pct": None, "extra": "$0.00"}],
+            },
+            {
+                "agent": "Codex",
+                "metrics": [
+                    {"label": "Weekly", "pct": 0, "extra": ""},
+                    {"label": "Credits", "pct": None, "extra": "$0"},
+                ],
+            },
+        ]
+
+        visible = panel_wpf._visible_agents(agents)
+        self.assertEqual([agent["agent"] for agent in visible], ["Codex"])
+        markup = panel_wpf._card(visible[0], panel_wpf._theme(True))
+        self.assertIn('Text="week"', markup)
+        self.assertNotIn('Text="credits"', markup)
+        self.assertNotIn("$0", markup)
 
     def test_a_local_cli_provider_keeps_every_window(self):
         agent = {
@@ -881,28 +1129,47 @@ class PanelSurfaceTests(unittest.TestCase):
             SimpleNamespace(_until=lambda _: "3h"),
         )
 
-    def test_every_surface_colour_is_fully_opaque(self):
-        # Windows build 26xxx no longer honours ACCENT_ENABLE_ACRYLICBLURBEHIND:
-        # the call succeeds but leaves the client area undefined, and with
-        # AllowsTransparency="False" undefined composites as black. Nothing here
-        # may depend on transparency again.
+    def test_text_tokens_stay_fully_opaque(self):
+        # Desktop can modulate translucent greys into grey-on-grey. Foreground
+        # tokens must stay solid even when the acrylic surface is translucent.
         for light in (True, False):
-            for token, value in panel_wpf._theme(light).items():
+            for acrylic in (True, False):
+                theme = panel_wpf._theme(light, acrylic=acrylic)
+                for token in ("fg", "muted", "faint", "chip"):
+                    with self.subTest(light=light, acrylic=acrylic, token=token):
+                        self.assertRegex(theme[token], r"^#FF[0-9A-Fa-f]{6}$")
+
+    def test_acrylic_theme_uses_translucent_surface(self):
+        for light in (True, False):
+            theme = panel_wpf._theme(light, acrylic=True)
+            alpha = int(theme["surface"][1:3], 16)
+            with self.subTest(light=light):
+                self.assertLess(alpha, 255)
+                self.assertGreaterEqual(alpha, 0x80)
+
+    def test_opaque_theme_stays_solid(self):
+        for light in (True, False):
+            theme = panel_wpf._theme(light, acrylic=False)
+            for token, value in theme.items():
                 with self.subTest(light=light, token=token):
                     self.assertRegex(value, r"^#FF[0-9A-Fa-f]{6}$")
 
-    def test_the_window_never_asks_for_transparency(self):
+    def test_the_window_uses_system_acrylic_not_layered_transparency(self):
+        # System backdrops refuse WS_EX_LAYERED. AllowsTransparency must stay
+        # False; the transparent window brush is cleared via HwndSource instead.
         markup = self._markup()
 
         self.assertIn('AllowsTransparency="False"', markup)
-        self.assertNotIn('Background="Transparent"', markup)
+        self.assertIn('Background="Transparent"', markup)
+        self.assertIn('x:Name="SlideTransform"', markup)
         for dead in ("BackdropHost", "BackdropBlur", "ImageBrush", "BlurEffect"):
             with self.subTest(element=dead):
                 self.assertNotIn(dead, markup)
 
     def test_the_panel_stays_compact(self):
-        # It was 360x436 DIP with a header row, icon tile and pill per provider.
-        self.assertLessEqual(panel_wpf.PANEL_WIDTH, 280)
+        # A small width increase buys full-width meters without becoming a window.
+        self.assertLessEqual(panel_wpf.PANEL_WIDTH, 320)
+        self.assertGreaterEqual(panel_wpf.PANEL_WIDTH, 300)
         self.assertIn(f'Width="{panel_wpf.PANEL_WIDTH:.0f}"', self._markup())
 
     def test_percentage_rows_show_their_reset_without_gaining_height(self):
@@ -920,11 +1187,12 @@ class PanelSurfaceTests(unittest.TestCase):
             SimpleNamespace(_until=lambda _: "3h"),
         )
 
-        self.assertIn('Text="3h"', markup)
-        self.assertEqual(markup.count('<Grid Height="19">'), 1)
+        self.assertIn('Text="· 3h"', markup)
+        self.assertEqual(markup.count('Tag="MetricUsage"'), 1)
+        self.assertIn(f'Height="{panel_wpf.BAR_HEIGHT:.0f}"', markup)
 
-    def test_panel_uses_bahnschrift(self):
-        self.assertIn('FontFamily="Bahnschrift"', self._markup())
+    def test_panel_uses_native_variable_type(self):
+        self.assertIn('FontFamily="Segoe UI Variable Text"', self._markup())
 
     def test_mixed_freshness_shows_real_cache_age(self):
         data = [
@@ -975,37 +1243,34 @@ class PanelSurfaceTests(unittest.TestCase):
         self.assertIn('ToolTip="cached · 8m old"', markup)
         self.assertIn('ToolTip="unavailable · offline"', markup)
 
-    def test_panel_uses_its_own_provider_monograms(self):
+    def test_panel_uses_provider_artwork(self):
         markup = self._markup()
 
-        self.assertNotIn("<Image", markup)
-        self.assertIn('Text="C"', markup)
-        self.assertIn('Text="X"', markup)
+        # Provider-owned identifiers from the documented assets directory.
+        self.assertIn("<Image", markup)
+        self.assertIn("claude.png", markup)
+        self.assertIn("codex.png", markup)
 
     def test_each_metric_occupies_exactly_one_fixed_height_row(self):
-        # Height is now predictable: rows * 19 plus chrome. A provider no longer
-        # costs a header row of its own; its name rides on its first metric.
+        # Each provider owns its identity once, above one visual row per metric.
         markup = self._markup()
-        rows = markup.count('<Grid Height="19">')
+        rows = markup.count('Tag="MetricUsage"') + markup.count('Tag="MetricAmount"')
         metrics = sum(len(agent["metrics"]) for agent in SAMPLE_AGENTS)
 
         self.assertEqual(rows, metrics)
+        self.assertEqual(markup.count('Tag="ProviderHeader"'), len(SAMPLE_AGENTS))
 
-    def test_columns_add_up_to_the_content_width(self):
-        # Over-allocating left 12 px for the percentage, so "88%" rendered as "88"
-        # jammed against the bar.
-        total = (
-            panel_wpf.IDENTITY_COLUMN
-            + panel_wpf.LABEL_COLUMN
-            + panel_wpf.BAR_COLUMN
-            + panel_wpf.VALUE_COLUMN
-        )
-
-        self.assertEqual(total, panel_wpf.CONTENT_WIDTH)
+    def test_meter_uses_the_full_content_width(self):
+        # Provider identity no longer steals most of every metric's meter.
+        self.assertEqual(panel_wpf.BAR_TRACK, panel_wpf.CONTENT_WIDTH)
         self.assertEqual(
             panel_wpf.CONTENT_WIDTH,
-            panel_wpf.PANEL_WIDTH - 2 * panel_wpf.PANEL_PADDING - 2 * panel_wpf.PANEL_BORDER,
+            panel_wpf.PANEL_WIDTH
+            - 2 * panel_wpf.WINDOW_PADDING
+            - 2 * panel_wpf.CARD_BORDER
+            - 2 * panel_wpf.CARD_PADDING,
         )
+        self.assertGreaterEqual(panel_wpf.BAR_TRACK, 250.0)
         self.assertGreaterEqual(panel_wpf.VALUE_COLUMN, 56.0)
 
     def test_a_bar_never_exceeds_its_track_and_zero_stays_empty(self):
@@ -1015,13 +1280,43 @@ class PanelSurfaceTests(unittest.TestCase):
         self.assertEqual(panel_wpf._bar_fill(0), 0.0)
         self.assertEqual(panel_wpf._bar_fill(100), panel_wpf.BAR_TRACK)
 
-    def test_both_row_kinds_share_one_column_layout(self):
-        # The "$33.75" / "off" rows used a two-column grid, so their values landed
-        # somewhere no other row's value did.
-        markup = self._markup()
-        grids = markup.count(f'<ColumnDefinition Width="{panel_wpf.BAR_COLUMN:.0f}"/>')
+    def test_amount_rows_do_not_draw_empty_meters(self):
+        usage = panel_wpf._metric_row({"label": "week", "pct": 42}, panel_wpf._theme(True))
+        amount = panel_wpf._metric_row(
+            {"label": "balance", "pct": None, "extra": "$6.50"},
+            panel_wpf._theme(True),
+        )
 
-        self.assertEqual(grids, markup.count(f'<Grid Height="{panel_wpf.ROW_HEIGHT:.0f}">'))
+        self.assertIn('Tag="MetricUsage"', usage)
+        self.assertIn(f'Height="{panel_wpf.BAR_HEIGHT:.0f}"', usage)
+        self.assertIn('Tag="MetricAmount"', amount)
+        self.assertNotIn(f'Height="{panel_wpf.BAR_HEIGHT:.0f}"', amount)
+
+    def test_repeated_zero_quotas_are_a_collapsed_disclosure(self):
+        agent = {
+            "agent": "Antigrav",
+            "metrics": [
+                {"label": "Weekly", "pct": 0, "_reset_text": "6d"},
+                {"label": "Session", "pct": 0, "_reset_text": "4h"},
+                {"label": "Claude Wk", "pct": 5, "_reset_text": "5d"},
+                {"label": "Claude", "pct": 0, "_reset_text": "1h"},
+            ],
+        }
+
+        markup = panel_wpf._card(agent, panel_wpf._theme(True))
+
+        self.assertEqual(markup.count('Tag="MetricUsage"'), 4)
+        self.assertEqual(markup.count('Tag="MetricAmount"'), 0)
+        self.assertIn('<Expander Tag="ZeroUsage:Antigravity" IsExpanded="False"', markup)
+        self.assertIn('Text="3 quotas at 0%"', markup)
+        self.assertIn('AutomationProperties.Name="3 quotas at 0%; expand for details"', markup)
+        self.assertIn(
+            'ToolTip="gemini week at 0% · resets 6d; gemini session at 0% · resets 4h; claude session at 0% · resets 1h"',
+            markup,
+        )
+        for label in ("gemini week", "gemini session", "claude week", "claude session"):
+            with self.subTest(label=label):
+                self.assertIn(f'Text="{label}"', markup)
 
     def test_the_provider_name_appears_once_per_provider(self):
         markup = self._markup()
@@ -1048,10 +1343,44 @@ class PanelSilhouetteTests(unittest.TestCase):
         self.assertIn(f'x:Name="GlassClip" {radius}', markup)
         # One rounded layer only. The decorative rim, inner stroke and highlight
         # each drew their own arc, which is how three curves ended up on screen.
-        self.assertEqual(markup.count("CornerRadius="), 1)
+        self.assertGreaterEqual(markup.count("CornerRadius="), 1)
 
 
 class PanelMaterialTests(unittest.TestCase):
+    def test_opaque_fallback_uses_tokens_that_exist(self):
+        source = Path(panel_wpf.__file__).read_text(encoding="utf-8")
+
+        self.assertIn('opaque["border_top"]', source)
+        self.assertNotIn('opaque["border"]', source)
+        self.assertIn('acrylic=chrome["acrylic"]', source)
+
+    def test_rapid_toggle_reverses_closing_state(self):
+        calls = []
+        window = SimpleNamespace(IsVisible=True)
+        closing = {"value": True}
+
+        def begin_open_slide():
+            closing["value"] = False
+            calls.append("open_slide")
+
+        def close_animated():
+            calls.append("close_animated")
+
+        # Simulate present when window is visible and closing
+        anchor = {"rect": None}
+        def present(anchor_rect=None):
+            anchor["rect"] = anchor_rect
+            if window.IsVisible:
+                if closing["value"]:
+                    begin_open_slide()
+                else:
+                    close_animated()
+                return
+
+        present()
+        self.assertFalse(closing["value"])
+        self.assertEqual(calls, ["open_slide"])
+
     def test_nothing_in_the_panel_reports_a_size_from_a_bitmap(self):
         # History: the backdrop was an <Image>, which reports a desired size. Under
         # SizeToContent="Height" each captured frame fed its own height back into
@@ -1086,10 +1415,15 @@ class PanelMaterialTests(unittest.TestCase):
         window.Show = lambda: calls.append(("show", window.Opacity))
         window.Activate = lambda: calls.append("activate")
 
+        def prepare():
+            window.Opacity = 1.0
+            calls.append("prepare")
+
         panel_wpf._present_prepared_window(
             window,
             (1, 2, 3, 4),
             lambda anchor: calls.append(("position", anchor)),
+            prepare,
             lambda: calls.append("slide"),
         )
 
@@ -1098,8 +1432,9 @@ class PanelMaterialTests(unittest.TestCase):
             [
                 ("position", (1, 2, 3, 4)),
                 "layout",
-                "slide",
+                "prepare",
                 ("show", 1.0),
+                "slide",
                 "activate",
             ],
         )

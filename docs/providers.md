@@ -13,7 +13,7 @@ response.
 
 ## quick start
 
-Set the variable for a provider you use, then restart Fleet:
+Set the variable for a provider you use, then choose **Refresh now** in Fleet:
 
 ```powershell
 setx OPENROUTER_API_KEY "sk-or-..."
@@ -46,7 +46,7 @@ Free usage endpoints — enabled as soon as the variable exists:
 
 | id | variable | shows |
 | --- | --- | --- |
-| `openrouter` | `OPENROUTER_API_KEY` | key spending cap, monthly and daily spend |
+| `openrouter` | `OPENROUTER_API_KEY` | account credit balance with a management key; key budget/spend fallback with a regular key |
 | `deepseek` | `DEEPSEEK_API_KEY` | account balance |
 | `moonshot` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | available balance |
 | `minimax` | `MINIMAX_API_KEY` | coding-plan prompts used, window reset |
@@ -84,7 +84,7 @@ Enable one in `providers.json`:
 ```
 
 Each poll sends one `max_tokens: 1` request — a fraction of a cent at current
-prices, once every 90 seconds per enabled provider. `model` overrides the model
+prices, once every 120 seconds per enabled provider. `model` overrides the model
 Fleet asks for; use it when the default has been retired on your account.
 
 ## config file

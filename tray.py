@@ -2,10 +2,10 @@
 """
 tray.py - system-tray widget for fleet.
 
-Tray icon cycles each provider's cached usage ring. Single-click (or menu -> Show
+Tray icon cycles logo-led provider usage badges. Single-click (or menu -> Show
 panel) opens a native popup card with per-agent bars. The popup is a SEPARATE
 process, so it displays reliably and closes on click-away. Provider data refreshes
-every 90s.
+every 120s.
 
 Run (hidden):  fleet-tray.cmd
 Panel only:    pythonw tray.py --panel
@@ -28,11 +28,10 @@ PYW = HERE / ".venv" / "Scripts" / "pythonw.exe"
 PANEL_PID = CACHE / "panel-host.pid"
 PANEL_SIGNAL = CACHE / "panel.show"
 PANEL_QUIT = CACHE / "panel.quit"
-REFRESH_SECS = 90
+REFRESH_SECS = 120
 CYCLE_SECS = 2
 CYCLE_CAP = 6  # icon frames per loop; see usage_cycle
-SHORT = {"Claude": "CL", "Codex": "CX", "Grok": "GR", "Antigrav": "AG"}
-MARK = {"Claude": "C", "Codex": "X", "Grok": "G", "Antigrav": "A"}
+MARK = {"Claude": "CL", "Codex": "CX", "Grok": "GR", "Antigrav": "AG"}
 
 # palette (dark card -> readable regardless of OS light/dark theme)
 BG, CARD, FG, MUTED, TRACK = "#15151d", "#1e1e28", "#e8e8f0", "#9a9aa8", "#33333f"
@@ -44,7 +43,12 @@ API_ACCENT = ["#60a5fa", "#34d399", "#fbbf24", "#a78bfa", "#f472b6", "#38bdf8", 
 
 def _mark_for(agent):
     letters = [char for char in str(agent or "") if char.isalnum()]
-    return MARK.get(agent) or (letters[0].upper() if letters else "F")
+    capitals = [char for char in letters if char.isupper()]
+    if agent in MARK:
+        return MARK[agent]
+    if len(capitals) >= 2:
+        return "".join(capitals[:2])
+    return "".join(letters[:2]).upper() if letters else "F"
 
 
 def _accent_for(agent):
@@ -149,8 +153,9 @@ def worst_pct(data):
 
 def sev(pct):
     if pct is None:
-        return "#6b7280"
-    return "#22c55e" if pct < 60 else "#eab308" if pct < 85 else "#ef4444"
+        return "#64748b"
+    # Match the popup meters: calm blue, then amber and coral under pressure.
+    return "#4f7cff" if pct < 60 else "#d89a2b" if pct < 85 else "#e05252"
 
 
 # ---------- tray icon ----------
@@ -167,41 +172,153 @@ def usage_cycle(data):
             for metric in provider.get("metrics", [])
             if metric.get("pct") is not None
         ]
+        # Compact API providers that only expose a balance add no actionable
+        # utilization signal. Keep them in the popup, not in the icon carousel.
+        if provider.get("compact") and not pcts:
+            continue
         frame = (provider.get("agent"), max(pcts) if pcts else None)
         (api if provider.get("compact") else local).append(frame)
-    # Worst window first; balance-only providers have no percentage and go last.
-    api.sort(key=lambda frame: (frame[1] is None, -(frame[1] or 0.0)))
+    api.sort(key=lambda frame: -(frame[1] or 0.0))
     frames = local + api[: max(0, CYCLE_CAP - len(local))]
     return frames or [(None, None)]
 
 
-@lru_cache(maxsize=32)
-def make_icon_image(agent, pct):
-    from PIL import Image, ImageDraw, ImageFont
+def _hex_to_rgb(hex_str):
+    h = str(hex_str or "").lstrip("#")
+    if len(h) == 8:
+        return tuple(int(h[i:i + 2], 16) for i in (2, 4, 6))
+    if len(h) == 6:
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return (148, 163, 184)
 
-    S, w, pad = 64, 10, 5
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    box = (pad, pad, S - pad, S - pad)
-    d.ellipse((15, 15, 49, 49), fill=(20, 21, 29, 255))
-    d.arc(box, 0, 360, fill=(148, 163, 184, 105), width=w)
-    r = tuple(int(sev(pct)[i:i + 2], 16) for i in (1, 3, 5))
-    if pct is None:
-        d.arc(box, 130, 230, fill=(120, 120, 132, 255), width=w)
-    elif pct > 0:
-        d.arc(box, -90, -90 + min(360, 360 * pct / 100), fill=r + (255,), width=w)
+
+def _get_icon_font(size):
+    for fpath in (
+        r"C:\Windows\Fonts\segoeuib.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\bahnschrift.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf",
+    ):
+        if Path(fpath).exists():
+            try:
+                from PIL import ImageFont
+                return ImageFont.truetype(fpath, size)
+            except Exception:
+                pass
+    from PIL import ImageFont
+    return ImageFont.load_default(size=size)
+
+
+ASSETS_DIR = HERE / "assets" / "providers"
+PROVIDER_ASSETS = {
+    "claude": "claude.png",
+    "anthropic": "claude.png",
+    "anthropicorg": "claude.png",
+    "codex": "codex.png",
+    "openai": "codex.png",
+    "openaiorg": "codex.png",
+    "grok": "grok.ico",
+    "xai": "grok.ico",
+    "antigrav": "antigravity.png",
+    "antigravity": "antigravity.png",
+}
+
+
+def _provider_asset_path(agent):
+    key = "".join(char for char in str(agent or "").casefold() if char.isalnum())
+    filename = PROVIDER_ASSETS.get(key)
+    path = ASSETS_DIR / filename if filename else None
+    return path if path and path.is_file() else None
+
+
+def _provider_art(agent):
+    """Load and tightly crop provider artwork without mutating the source file."""
+    from PIL import Image, ImageChops
+
+    path = _provider_asset_path(agent)
+    if path is None:
+        return None
+    try:
+        with Image.open(path) as source:
+            source.seek(0)
+            art = source.convert("RGBA")
+    except (OSError, ValueError):
+        return None
+
+    alpha = art.getchannel("A")
+    if alpha.getextrema()[0] < 255:
+        bounds = alpha.getbbox()
+    else:
+        background = Image.new("RGBA", art.size, art.getpixel((0, 0)))
+        bounds = ImageChops.difference(art, background).convert("RGB").getbbox()
+    return art.crop(bounds) if bounds else art
+
+
+def _draw_provider_badge(img, draw, agent, box):
+    """Draw real artwork when available, with a two-letter fallback for custom APIs."""
+    from PIL import Image, ImageOps
+
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    art = _provider_art(agent)
+    if art is not None:
+        fitted = ImageOps.contain(
+            art,
+            (max(1, int(width * 0.88)), max(1, int(height * 0.88))),
+            method=Image.Resampling.LANCZOS,
+        )
+        x = int(left + (width - fitted.width) / 2)
+        y = int(top + (height - fitted.height) / 2)
+        img.alpha_composite(fitted, (x, y))
+        return
 
     mark = _mark_for(agent)
-    accent = _accent_for(agent)
-    color = tuple(int(accent[i:i + 2], 16) for i in (1, 3, 5))
-    font = ImageFont.load_default(size=25)
-    left, top, right, bottom = d.textbbox((0, 0), mark, font=font)
-    d.text(
-        ((S - right + left) / 2, (S - bottom + top) / 2 - top),
-        mark,
-        fill=color + (255,),
-        font=font,
+    font = _get_icon_font(int(height * (0.48 if len(mark) == 1 else 0.38)))
+    ink = draw.textbbox((0, 0), mark, font=font)
+    x = left + (width - (ink[2] - ink[0])) / 2 - ink[0]
+    y = top + (height - (ink[3] - ink[1])) / 2 - ink[1] - 2
+    draw.text((x, y), mark, fill=(15, 23, 42, 255), font=font)
+
+
+@lru_cache(maxsize=32)
+def make_icon_image(agent, pct):
+    from PIL import Image, ImageDraw
+
+    HIGH_S = 256
+    METER_TOP = 194
+
+    img = Image.new("RGBA", (HIGH_S, HIGH_S), (248, 250, 252, 255))
+    d = ImageDraw.Draw(img)
+
+    # The shell shows this around 16 px. A full-bleed tile uses the whole slot;
+    # the 62 px source meter becomes a legible four-pixel band instead of the
+    # old 1.4 px ring. Returning the 256 px source also lets Pillow build ICO
+    # frames directly, avoiding the old 256 -> 64 -> shell-size double resample.
+    track = (100, 116, 139, 255) if pct is None else (51, 65, 85, 255)
+    d.rectangle((0, METER_TOP, HIGH_S, HIGH_S), fill=track)
+
+    if pct is not None:
+        value = max(0.0, min(100.0, float(pct)))
+        if value > 0:
+            color = _hex_to_rgb(sev(value)) + (255,)
+            # Preserve one logical pixel after pystray's ICO32 -> shell16 pass.
+            # Without this low positive fills disappear into the rounded corner.
+            fill_width = max(HIGH_S * 3 // 32, round(HIGH_S * value / 100.0))
+            d.rectangle((0, METER_TOP, fill_width - 1, HIGH_S), fill=color)
+
+    _draw_provider_badge(img, d, agent, (24, 16, 232, 190))
+    d.rounded_rectangle(
+        (2, 2, HIGH_S - 3, HIGH_S - 3),
+        radius=44,
+        outline=(148, 163, 184, 255),
+        width=7,
     )
+    mask = Image.new("L", (HIGH_S, HIGH_S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, HIGH_S - 1, HIGH_S - 1), radius=46, fill=255
+    )
+    img.putalpha(mask)
+
     return img
 
 
@@ -214,15 +331,15 @@ def tooltip(data):
         d = by_name.get(agent)
         if d is None:
             continue
-        s = SHORT.get(agent) or str(agent)[:2].upper()
+        name = "Antigravity" if agent == "Antigrav" else str(agent or "Fleet")
         if pct is not None:
-            parts.append(f"{s} {pct:.0f}%")
+            parts.append(f"{name} {pct:.0f}%")
         elif d.get("metrics"):
             first = d["metrics"][0]
-            parts.append(f"{s} {(first.get('extra') or first.get('label') or '')[:8]}".strip())
+            parts.append(f"{name} {(first.get('extra') or first.get('label') or '')[:8]}".strip())
         else:
-            parts.append(f"{s} –")
-    return ("FLEET   " + "   ".join(parts))[:126]
+            parts.append(f"{name} –")
+    return ("FLEET  ·  " + "  ·  ".join(parts))[:126]
 
 
 # ---------- popup panel ----------
@@ -387,7 +504,7 @@ def run_panel():
                      font=("Segoe UI", 7)).pack(fill="x", padx=12, pady=(0, 6))
         tk.Frame(card, bg=p["card"], height=3).pack()
 
-    tk.Label(wrap, text="auto-refresh 90s · click away to close", bg=p["win"], fg=p["ft"],
+    tk.Label(wrap, text="auto-refresh 120s · click away to close", bg=p["win"], fg=p["ft"],
              font=("Segoe UI", 7)).pack(pady=(4, 0))
 
     root.update_idletasks()

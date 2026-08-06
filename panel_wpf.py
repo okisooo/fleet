@@ -1,6 +1,6 @@
 """Native WPF flyout renderer for Fleet.
 
-The warm host keeps one opaque WPF window ready between clicks.
+The warm host keeps one WPF window ready between clicks.\nWin11 system acrylic (DWMWA_SYSTEMBACKDROP_TYPE) is preferred; motion is a\ncontent TranslateTransform + opacity fade, never a Window.Top move.
 """
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -20,26 +21,42 @@ WPF = (
 )
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWA_SYSTEMBACKDROP_TYPE = 38
 DWMWCP_ROUND = 2
+# Transient-window acrylic is the official Win11 flyout material (menus, popups).
+DWMSBT_TRANSIENTWINDOW = 3
 MONITOR_DEFAULTTONEAREST = 2
+# Content-space motion only. Animating Window.Top forces a full DWM window move
+# every frame and is what made the old slide feel capped around 30 fps.
+SLIDE_DISTANCE = 12.0
+OPEN_MS = 180
+CLOSE_MS = 140
 PANEL_EDGE_GAP = 12.0
 PANEL_ANCHOR_GAP = 10.0
 # Must match what DWM actually rounds the window to. DWMWCP_ROUND is the Windows 11
 # standard 8 px for a flyout of this size. Drawing the rim at a different radius put
 # three curves on screen at once, which is what made the corners look mislayered.
-PANEL_CORNER_RADIUS = 8.0
-PANEL_WIDTH = 280.0
-PANEL_PADDING = 10.0
+PANEL_CORNER_RADIUS = 10.0
+PANEL_WIDTH = 320.0
+# Real chrome: GlassClip padding, then a quiet card surface with room for data.
+WINDOW_PADDING = 10.0
+CARD_PADDING = 10.0
+CARD_BORDER = 1.0
+PANEL_PADDING = WINDOW_PADDING
 PANEL_BORDER = 1.0
-ROW_HEIGHT = 19.0
-# Columns must add up to the content width or the last one gets squeezed to
-# nothing: an over-wide bar is what cut "88%" down to "88" against the bar.
-IDENTITY_COLUMN = 88.0
-LABEL_COLUMN = 44.0
-VALUE_COLUMN = 56.0
-CONTENT_WIDTH = PANEL_WIDTH - 2 * PANEL_PADDING - 2 * PANEL_BORDER
-BAR_COLUMN = CONTENT_WIDTH - IDENTITY_COLUMN - LABEL_COLUMN - VALUE_COLUMN
-BAR_TRACK = BAR_COLUMN - 10.0  # the column carries a right margin
+ROW_HEIGHT = 27.0
+AMOUNT_ROW_HEIGHT = 22.0
+PROVIDER_HEADER_HEIGHT = 20.0
+BAR_HEIGHT = 6.0
+VALUE_COLUMN = 64.0
+CONTENT_WIDTH = (
+    PANEL_WIDTH
+    - 2 * WINDOW_PADDING
+    - 2 * CARD_BORDER
+    - 2 * CARD_PADDING
+)
+BAR_TRACK = CONTENT_WIDTH
+NAME_MAX_WIDTH = CONTENT_WIDTH - 28.0
 
 
 def _bar_fill(pct):
@@ -54,7 +71,12 @@ API_ACCENTS = [
     "#FF60A5FA", "#FF34D399", "#FFFBBF24", "#FFA78BFA",
     "#FFF472B6", "#FF38BDF8", "#FFFB923C", "#FF94A3B8",
 ]
-GRAD = {"g": "#FF3FB950", "y": "#FFD29922", "r": "#FFF85149", "n": "#FF6E7681"}
+GRAD = {"g": "#FF22C55E", "y": "#FFF59E0B", "r": "#FFEF4444", "n": "#FF64748B"}
+# Quotas use one calm base colour; amber and coral are reserved for pressure.
+# Freshness remains green/amber/red through GRAD, so state and consumption never
+# compete for the same visual meaning.
+METER = {"g": "#FF4F7CFF", "y": "#FFD89A2B", "r": "#FFE05252", "n": "#FF64748B"}
+ASSETS_DIR = Path(__file__).resolve().parent / "assets" / "providers"
 
 
 def _load_wpf():
@@ -156,13 +178,13 @@ def _anchored_panel_origin(
     return left, top
 
 
-def _present_prepared_window(window, anchor_rect, position, begin_slide):
-    """Show the warm flyout once, already in its final visual state."""
+def _present_prepared_window(window, anchor_rect, position, prepare_open, begin_slide):
+    """Show the warm flyout at its final rect, then play content-space motion."""
     position(anchor_rect)
     window.UpdateLayout()
-    window.Opacity = 1.0
-    begin_slide()
+    prepare_open()
     window.Show()
+    begin_slide()
     window.Activate()
 
 
@@ -199,47 +221,108 @@ def _set_dwm_int(hwnd, attribute, value):
     )
 
 
-def _apply_window_chrome(hwnd, light):
-    """Round the window and match the OS theme. No transparency is requested.
+class _MARGINS(ctypes.Structure):
+    _fields_ = [
+        ("cxLeftWidth", ctypes.c_int),
+        ("cxRightWidth", ctypes.c_int),
+        ("cyTopHeight", ctypes.c_int),
+        ("cyBottomHeight", ctypes.c_int),
+    ]
 
-    Extending the frame or asking for a system backdrop only matters when the
-    client area is meant to show through. This panel paints itself opaquely, so
-    doing either just risks the black client area seen on recent Windows builds.
+
+def _force_opaque():
+    """Local escape hatch: FLEET_OPAQUE=1 keeps the solid panel."""
+    return os.environ.get("FLEET_OPAQUE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _apply_window_chrome(hwnd, light):
+    """Round corners, match theme, and request official Win11 flyout acrylic.
+
+    System backdrops refuse layered windows, so the panel keeps
+    AllowsTransparency=False and clears the client through HwndSource instead of
+    the old ACCENT_ENABLE_ACRYLICBLURBEHIND path (broken on 26xxx+).
     """
     _set_dwm_int(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 0 if light else 1)
-    return _set_dwm_int(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+    _set_dwm_int(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+    if _force_opaque():
+        return False
+    hr = _set_dwm_int(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
+    if hr != 0:
+        return False
+    margins = _MARGINS(-1, -1, -1, -1)
+    extend = ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+    return extend == 0
 
 
-def _theme(light):
-    """Colour tokens for one OS theme.
+def _theme(light, acrylic=True):
+    """macOS Liquid Glass theme tokens.
 
-    Text sits on a live, moving backdrop, so every foreground colour is fully
-    opaque. Semi-transparent greys were the old approach and they let the desktop
-    modulate the text contrast, which is how the panel ended up grey-on-grey
-    whenever a light window happened to pass behind it.
+    Foreground colours stay fully opaque so text contrast never rides the desktop.
+    Surface, glass card pods, and specular rims use subtle transparency and
+    gradients.
     """
     if light:
+        if acrylic:
+            return {
+                "surface": "#D9F8FAFC",
+                "border_top": "#E0FFFFFF",
+                "border_bot": "#40D8DEE9",
+                "card_top": "#D6FFFFFF",
+                "card_bg": "#A8FFFFFF",
+                "card_border": "#78FFFFFF",
+                "icon_bg": "#15000000",
+                "fg": "#FF0F172A",
+                "muted": "#FF475569",
+                "faint": "#FF64748B",
+                "track": "#240F172A",
+                "pill_bg": "#FFF1F5F9",
+                "chip": "#FFF7F9FC",
+            }
         return {
-            # Opaque. Windows build 26xxx no longer honours
-            # ACCENT_ENABLE_ACRYLICBLURBEHIND: the call succeeds but leaves the
-            # client area undefined, and with AllowsTransparency="False" undefined
-            # composites as black. Readability is not worth another attempt.
             "surface": "#FFF7F9FC",
-            "border": "#FFD8DEE9",
-            "divider": "#FFE7ECF3",
-            "fg": "#FF10151E",
-            "muted": "#FF48566B",
-            "faint": "#FF6A788C",
-            "track": "#FFDDE3EC",
+            "border_top": "#FFD8DEE9",
+            "border_bot": "#FFD8DEE9",
+            "card_top": "#FFFFFFFF",
+            "card_bg": "#FFFFFFFF",
+            "card_border": "#FFE2E8F0",
+            "icon_bg": "#FFE2E8F0",
+            "fg": "#FF0F172A",
+            "muted": "#FF475569",
+            "faint": "#FF64748B",
+            "track": "#FFE2E8F0",
+            "pill_bg": "#FFF1F5F9",
+            "chip": "#FFF7F9FC",
+        }
+    if acrylic:
+        return {
+            "surface": "#CC12161F",
+            "border_top": "#50FFFFFF",
+            "border_bot": "#15FFFFFF",
+            "card_top": "#24FFFFFF",
+            "card_bg": "#14FFFFFF",
+            "card_border": "#20FFFFFF",
+            "icon_bg": "#20FFFFFF",
+            "fg": "#FFF0F4F8",
+            "muted": "#FF94A3B8",
+            "faint": "#FF64748B",
+            "track": "#25FFFFFF",
+            "pill_bg": "#FF1E2530",
+            "chip": "#FF1A1E25",
         }
     return {
-        "surface": "#FF1A1E25",
-        "border": "#FF313842",
-        "divider": "#FF262C35",
-        "fg": "#FFF2F5F9",
-        "muted": "#FFAFBCCC",
-        "faint": "#FF8593A5",
-        "track": "#FF2C333D",
+        "surface": "#FF181C24",
+        "border_top": "#FF313842",
+        "border_bot": "#FF313842",
+        "card_top": "#FF282E39",
+        "card_bg": "#FF222732",
+        "card_border": "#FF2D3442",
+        "icon_bg": "#FF2D3442",
+        "fg": "#FFF0F4F8",
+        "muted": "#FF94A3B8",
+        "faint": "#FF64748B",
+        "track": "#FF2D3442",
+        "pill_bg": "#FF2D3442",
+        "chip": "#FF1A1E25",
     }
 
 
@@ -265,6 +348,9 @@ SHORT_LABELS = {
     "Weekly": "week",
     "Daily": "day",
     "Monthly": "month",
+    "Balance": "balance",
+    "Credits": "credits",
+    "Pay-go": "pay-go",
 }
 
 
@@ -273,96 +359,153 @@ def _short_label(value):
     return SHORT_LABELS.get(raw, raw.lower())
 
 
+def _looks_like_money(extra):
+    text = str(extra or "").strip()
+    if not text:
+        return False
+    if text[0] in "$¥€£":
+        return True
+    upper = text.upper()
+    return upper.endswith((" USD", " CNY", " EUR", " GBP"))
+
+
+def _is_zero_money_metric(metric):
+    """Hide zero-dollar facts, but never hide an actual zero-percent quota."""
+    if metric.get("pct") is not None:
+        return False
+    extra = str(metric.get("extra") or "").strip()
+    if not _looks_like_money(extra):
+        return False
+    numeric = re.sub(r"[^0-9.+-]", "", extra.replace(",", ""))
+    try:
+        return float(numeric) == 0
+    except ValueError:
+        return False
+
+
+def _visible_agents(data):
+    """Copy provider data while removing empty zero-money-only cards."""
+    visible = []
+    for agent in data:
+        copied = dict(agent)
+        copied["metrics"] = [
+            metric for metric in (agent.get("metrics") or [])
+            if not _is_zero_money_metric(metric)
+        ]
+        if copied["metrics"] or copied.get("err"):
+            visible.append(copied)
+    return visible
+
+
+
+def _provider_icon_markup(raw_name, theme, mark, accent, status_text="", status_color=None):
+    name = raw_name.casefold()
+    mapped = {
+        "claude": "claude.png",
+        "codex": "codex.png",
+        "grok": "grok.ico",
+        "antigrav": "antigravity.png",
+        "antigravity": "antigravity.png",
+    }.get(name, f"{name}.png")
+
+    icon_file = ASSETS_DIR / mapped
+    status_dot = f"""<Ellipse Width="6" Height="6" Fill="{status_color or GRAD['n']}"
+                              Stroke="{theme['chip']}" StrokeThickness="1.2"
+                              HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                              Margin="0,0,-1,-1" ToolTip="{_x(status_text)}"/>"""
+
+    if icon_file.exists():
+        uri = _x(icon_file.absolute().as_uri())
+        return f"""
+            <Grid Width="18" Height="18" Margin="0,0,8,0" VerticalAlignment="Center">
+              <Border CornerRadius="5" Background="{theme['icon_bg']}" ClipToBounds="True">
+                <Image Source="{uri}" Width="15" Height="15" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
+              </Border>
+              {status_dot}
+            </Grid>"""
+
+    return f"""
+            <Grid Width="18" Height="18" Margin="0,0,8,0" VerticalAlignment="Center">
+              <Border Background="{accent or theme['track']}" CornerRadius="5"/>
+              <TextBlock Text="{_x(mark or '?')}" Foreground="{theme['chip']}" FontSize="9.5"
+                         FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              {status_dot}
+            </Grid>"""
+
+
 def _metric_row(
     metric,
     theme,
-    name=None,
-    mark=None,
-    accent=None,
-    status_text="",
-    status_color=None,
+    last=False,
 ):
-    """One line: optional provider identity, then label, bar, percentage.
-
-    The provider name lives on its first metric rather than in a header of its
-    own. That removes a whole row plus its spacing per provider, which is most of
-    where the old panel's height went.
-    """
-    label = _x(_short_label(metric.get("label")))
+    """A quota visual: metadata above a full-width meter, or one amount line."""
+    label_raw = _short_label(metric.get("label")) or "status"
+    label = _x(label_raw)
     pct = metric.get("pct")
-    identity = ""
-    if name is not None:
-        icon = f"""
-            <Grid Width="14" Height="14" Margin="0,0,7,0">
-              <Border Background="{accent or theme['track']}" CornerRadius="7"/>
-              <TextBlock Text="{_x(mark or '?')}" Foreground="{theme['surface']}" FontSize="8.5"
-                         FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-              <Ellipse Width="6" Height="6" Fill="{status_color or GRAD['n']}"
-                       Stroke="{theme['surface']}" StrokeThickness="1"
-                       HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                       ToolTip="{_x(status_text)}"/>
-            </Grid>"""
-        identity = f"""
-          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-            {icon}
-            <TextBlock Text="{_x(name)}" Foreground="{theme['fg']}" FontSize="11.5"
-                       FontWeight="SemiBold" VerticalAlignment="Center"/>
-          </StackPanel>"""
+    extra = (metric.get("extra") or "").strip()
+    reset = _x(metric.get("_reset_text") or "")
+    margin = "0" if last else "0,0,0,5"
+    tooltip = _x(metric.get("_tooltip") or "")
+    tooltip_attr = f' ToolTip="{tooltip}"' if tooltip else ""
 
-    # One grid shape for both row kinds so every column stays in the same place.
-    # Content width is PANEL_WIDTH minus padding and border; the bar takes what is
-    # left after the fixed columns, instead of a hardcoded width that overflowed
-    # and squeezed the percentage down to 12 px.
-    columns = f"""
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="{IDENTITY_COLUMN:.0f}"/>
-            <ColumnDefinition Width="{LABEL_COLUMN:.0f}"/>
-            <ColumnDefinition Width="{BAR_COLUMN:.0f}"/>
-            <ColumnDefinition Width="{VALUE_COLUMN:.0f}"/>
-          </Grid.ColumnDefinitions>"""
-
+    # Pure amount rows (balance/credits/extra): no meter.
     if pct is None:
-        value = _x(metric.get("extra") or "—")
+        value = _x(extra or "\u2014")
         return f"""
-        <Grid Height="{ROW_HEIGHT:.0f}">{columns}
-          {identity}
-          <TextBlock Grid.Column="1" Text="{label}" Foreground="{theme['faint']}"
-                     FontSize="10.5" VerticalAlignment="Center"
+        <Grid Tag="MetricAmount" Height="{AMOUNT_ROW_HEIGHT:.0f}" Margin="{margin}"{tooltip_attr}>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="{label}" Foreground="{theme['faint']}"
+                     FontSize="10.5" FontWeight="Medium" VerticalAlignment="Center"
                      TextTrimming="CharacterEllipsis"/>
-          <TextBlock Grid.Column="2" Grid.ColumnSpan="2" Text="{value}"
-                     Foreground="{theme['muted']}" FontSize="10.5"
-                     TextAlignment="Right" TextTrimming="CharacterEllipsis"
+          <TextBlock Grid.Column="1" Text="{value}"
+                     Foreground="{theme['fg']}" FontSize="12" FontWeight="SemiBold"
+                     Margin="12,0,0,0" TextAlignment="Right"
                      Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
         </Grid>"""
 
     pct = max(0.0, min(100.0, float(pct)))
-    fill_color = GRAD[_sevkey(pct)]
-    reset = _x(metric.get("_reset_text") or "")
-    pct_alignment = "Left" if reset else "Right"
-    reset_markup = (
-        f"""<TextBlock Text="{reset}" Foreground="{theme['faint']}" FontSize="9.5"
-                     HorizontalAlignment="Right" VerticalAlignment="Center"
-                     Typography.NumeralAlignment="Tabular"/>"""
+    fill_color = METER[_sevkey(pct)]
+    # Only currency extras replace the percentage. Count extras like 310/4000 cr
+    # remain percentage-first so the usage visual stays comparable.
+    if extra and _looks_like_money(extra):
+        value = _x(extra)
+    else:
+        value = f"{pct:.0f}%"
+    reset_block = (
+        f"""<TextBlock Text="· {reset}" Foreground="{theme['faint']}" FontSize="9.5"
+                         Margin="6,0,0,0" VerticalAlignment="Center"
+                         Typography.NumeralAlignment="Tabular"/>"""
         if reset
         else ""
     )
     return f"""
-      <Grid Height="{ROW_HEIGHT:.0f}">{columns}
-        {identity}
-        <TextBlock Grid.Column="1" Text="{label}" Foreground="{theme['faint']}"
-                   FontSize="10.5" VerticalAlignment="Center"
-                   TextTrimming="CharacterEllipsis"/>
-        <Grid Grid.Column="2" Height="4" VerticalAlignment="Center" Margin="0,0,10,0">
-          <Border Background="{theme['track']}" CornerRadius="2"/>
-          <Border Width="{_bar_fill(pct):.1f}" HorizontalAlignment="Left"
-                  CornerRadius="2" Background="{fill_color}"/>
-        </Grid>
-        <Grid Grid.Column="3">
-          <TextBlock Text="{pct:.0f}%" Foreground="{theme['fg']}"
-                     FontSize="11" FontWeight="SemiBold"
-                     HorizontalAlignment="{pct_alignment}"
+      <Grid Tag="MetricUsage" Height="{ROW_HEIGHT:.0f}" Margin="{margin}"{tooltip_attr}>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="{VALUE_COLUMN:.0f}"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel Orientation="Horizontal" ClipToBounds="True">
+            <TextBlock Text="{label}" Foreground="{theme['muted']}"
+                       FontSize="10.5" FontWeight="Medium" VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis"/>
+            {reset_block}
+          </StackPanel>
+          <TextBlock Grid.Column="1" Text="{value}" Foreground="{theme['fg']}"
+                     FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Right"
                      Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
-          {reset_markup}
+        </Grid>
+        <Grid Grid.Row="1" Height="{BAR_HEIGHT:.0f}" VerticalAlignment="Bottom" Margin="0,4,0,0">
+          <Border Background="{theme['track']}" CornerRadius="3"/>
+          <Border Width="{_bar_fill(pct):.1f}" HorizontalAlignment="Left"
+                  CornerRadius="3" Background="{fill_color}"/>
         </Grid>
       </Grid>"""
 
@@ -388,52 +531,123 @@ def _headline(metrics):
     return metrics[0]
 
 
+def _split_zero_metrics(metrics):
+    """Return visible metrics plus zero-percent quotas worth disclosing on demand."""
+    zeroes = [metric for metric in metrics if metric.get("pct") == 0]
+    if len(zeroes) < 2:
+        return metrics, []
+
+    return [metric for metric in metrics if metric.get("pct") != 0], zeroes
+
+
+ANTIGRAVITY_QUOTA_LABELS = {
+    "Session": "gemini session",
+    "Weekly": "gemini week",
+    "Claude": "claude session",
+    "Claude Wk": "claude week",
+}
+
+
+def _display_metric(metric, provider_name):
+    """Make Antigravity's four independent quota buckets unambiguous in the UI."""
+    if provider_name != "Antigravity":
+        return metric
+    label = ANTIGRAVITY_QUOTA_LABELS.get(str(metric.get("label") or ""))
+    if not label:
+        return metric
+    displayed = dict(metric)
+    displayed["label"] = label
+    return displayed
+
+
+def _zero_quota_expander(zeroes, theme, provider_name):
+    """Native keyboard-accessible disclosure for quota periods at exactly 0%."""
+    details = []
+    for metric in zeroes:
+        label = _short_label(metric.get("label")) or "quota"
+        reset = metric.get("_reset_text") or ""
+        details.append(f"{label} at 0% · resets {reset}" if reset else f"{label} at 0%")
+
+    rows = "".join(
+        _metric_row(metric, theme, last=index == len(zeroes) - 1)
+        for index, metric in enumerate(zeroes)
+    )
+    count = len(zeroes)
+    label = f"{count} quotas at 0%"
+    return f"""
+        <Expander Tag="ZeroUsage:{_x(provider_name)}" IsExpanded="False"
+                  HorizontalContentAlignment="Stretch" Cursor="Hand"
+                  AutomationProperties.Name="{_x(label)}; expand for details"
+                  ToolTip="{_x('; '.join(details))}">
+          <Expander.Header>
+            <Grid Width="{CONTENT_WIDTH - 24:.0f}" Height="{AMOUNT_ROW_HEIGHT:.0f}">
+              <TextBlock Text="{_x(label)}" Foreground="{theme['faint']}"
+                         FontSize="10.5" FontWeight="Medium" VerticalAlignment="Center"/>
+            </Grid>
+          </Expander.Header>
+          <StackPanel Margin="18,6,0,0">{rows}</StackPanel>
+        </Expander>"""
+
+
 def _card(agent, theme, last=False):
     raw_name = agent.get("agent") or "Unknown"
     name = "Antigravity" if raw_name == "Antigrav" else raw_name
     mark = PROVIDER_MARKS.get(raw_name) or _mark_for(name)
     accent = PROVIDER_ACCENTS.get(raw_name) or _accent_for(name)
 
-    metrics = agent.get("metrics") or []
+    metrics = [
+        _display_metric(metric, name)
+        for metric in (agent.get("metrics") or [])
+        if not _is_zero_money_metric(metric)
+    ]
+    zeroes = []
     if agent.get("compact") and metrics:
-        # One line per API-key provider: the flyout stays a glance widget even
-        # with a dozen of them configured.
         metrics = [_headline(metrics)]
+    else:
+        metrics, zeroes = _split_zero_metrics(metrics)
     status_text = agent.get("_status_text") or "unavailable"
     status_color = agent.get("_status_color") or GRAD["n"]
-    if metrics:
-        rows = "".join(
-            _metric_row(
-                metric,
-                theme,
-                name=name if index == 0 else None,
-                mark=mark if index == 0 else None,
-                accent=accent if index == 0 else None,
-                status_text=status_text if index == 0 else "",
-                status_color=status_color if index == 0 else None,
-            )
+    icon = _provider_icon_markup(name, theme, mark, accent, status_text, status_color)
+    if metrics or zeroes:
+        row_parts = [
+            _metric_row(metric, theme, last=index == len(metrics) - 1 and not zeroes)
             for index, metric in enumerate(metrics)
-        )
+        ]
+        if zeroes:
+            row_parts.append(_zero_quota_expander(zeroes, theme, name))
+        rows = "".join(row_parts)
     else:
         rows = _metric_row(
             {"label": "", "pct": None, "extra": agent.get("err") or "no data"},
             theme,
-            name=name,
-            mark=mark,
-            accent=accent,
-            status_text=status_text,
-            status_color=status_color,
+            last=True,
         )
 
-    divider = "0" if last else "0,0,0,1"
+    margin = "0" if last else "0,0,0,7"
     return f"""
-    <Border BorderBrush="{theme['divider']}" BorderThickness="{divider}"
-            Padding="0,3,0,3">
-      <StackPanel>{rows}</StackPanel>
+    <Border BorderBrush="{theme['card_border']}" BorderThickness="1" CornerRadius="10"
+            Padding="{CARD_PADDING:.0f},8,{CARD_PADDING:.0f},9" Margin="{margin}">
+      <Border.Background>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+          <GradientStop Color="{theme['card_top']}" Offset="0"/>
+          <GradientStop Color="{theme['card_bg']}" Offset="1"/>
+        </LinearGradientBrush>
+      </Border.Background>
+      <StackPanel>
+        <Grid Tag="ProviderHeader" Height="{PROVIDER_HEADER_HEIGHT:.0f}" Margin="0,0,0,7">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" ClipToBounds="True">
+            {icon}
+            <TextBlock Text="{_x(name)}" Foreground="{theme['fg']}" FontSize="12.5"
+                       FontWeight="SemiBold" VerticalAlignment="Center"
+                       MaxWidth="{NAME_MAX_WIDTH:.0f}" TextTrimming="CharacterEllipsis"/>
+          </StackPanel>
+        </Grid>
+        {rows}
+      </StackPanel>
     </Border>"""
 
 
-def _content_xaml(data, ts, light, fleet):
+def _content_xaml(data, ts, light, fleet, acrylic=True):
     """The panel's inner content, parseable on its own.
 
     Kept separate from the window shell so refreshed data can be swapped into a
@@ -442,7 +656,8 @@ def _content_xaml(data, ts, light, fleet):
     """
     import time
 
-    theme = _theme(light)
+    data = _visible_agents(data)
+    theme = _theme(light, acrylic=acrylic)
     cards = []
     for index, agent in enumerate(data):
         copied = dict(agent)
@@ -485,15 +700,25 @@ def _content_xaml(data, ts, light, fleet):
 <StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
             x:Name="ContentRoot" Opacity="1">
-  <Grid Height="18" Margin="0,0,0,3">
-    <TextBlock Text="fleet" Foreground="{theme['muted']}" FontSize="10.5"
-               FontWeight="SemiBold" VerticalAlignment="Center"/>
-    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
-                VerticalAlignment="Center">
-      <Ellipse Width="5" Height="5" Fill="{status_color}" Margin="0,0,5,0"
+  <Grid Height="24" Margin="2,0,2,9">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="Auto"/>
+      <ColumnDefinition Width="*"/>
+      <ColumnDefinition Width="Auto"/>
+    </Grid.ColumnDefinitions>
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+      <Border Width="3" Height="14" Background="{METER['g']}" CornerRadius="1.5"
+              Margin="0,0,7,0"/>
+      <TextBlock Text="fleet" Foreground="{theme['fg']}" FontSize="13.5"
+                 FontWeight="SemiBold" VerticalAlignment="Center"/>
+      <TextBlock Text="usage" Foreground="{theme['faint']}" FontSize="10.5"
+                 Margin="7,1,0,0" VerticalAlignment="Center"/>
+    </StackPanel>
+    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+      <Ellipse Width="6" Height="6" Fill="{status_color}" Margin="0,0,6,0"
                VerticalAlignment="Center"/>
-      <TextBlock Text="{_x(status_text)}" Foreground="{theme['faint']}"
-                 FontSize="10" Typography.NumeralAlignment="Tabular"
+      <TextBlock Text="{_x(status_text)}" Foreground="{theme['muted']}"
+                 FontSize="10" FontWeight="Medium" Typography.NumeralAlignment="Tabular"
                  VerticalAlignment="Center"/>
     </StackPanel>
   </Grid>
@@ -501,10 +726,10 @@ def _content_xaml(data, ts, light, fleet):
 </StackPanel>"""
 
 
-def _xaml(data, ts, light, fleet):
+def _xaml(data, ts, light, fleet, acrylic=True):
     """The window shell with its first content already inside."""
-    theme = _theme(light)
-    content = _content_xaml(data, ts, light, fleet)
+    theme = _theme(light, acrylic=acrylic)
+    content = _content_xaml(data, ts, light, fleet, acrylic=acrylic)
     # The fragment carries its own namespace declarations; strip them so it nests
     # cleanly inside the window.
     content = content.replace(
@@ -513,20 +738,33 @@ def _xaml(data, ts, light, fleet):
         '            x:Name="ContentRoot"',
         '<StackPanel x:Name="ContentRoot"',
     )
+    # Transparent window brush + AllowsTransparency=False is intentional: DWM
+    # system acrylic only attaches to non-layered windows. HwndSource clears the
+    # composition target after SourceInitialized.
+    window_bg = "Transparent" if acrylic else theme["surface"]
     return f"""
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="{PANEL_WIDTH:.0f}" SizeToContent="Height" WindowStyle="None"
         ResizeMode="NoResize" AllowsTransparency="False"
-        Background="{theme['surface']}" ShowInTaskbar="False"
-        Topmost="True" Opacity="0" FontFamily="Bahnschrift"
+        Background="{window_bg}" ShowInTaskbar="False"
+        Topmost="True" Opacity="0" FontFamily="Segoe UI Variable Text"
         TextOptions.TextFormattingMode="Display" SnapsToDevicePixels="True"
         UseLayoutRounding="True">
-  <!-- Opaque on purpose. Every transparency route on this Windows build ends in a
-       black client area, and unreadable is worse than unfashionable. -->
-  <Border x:Name="GlassClip" CornerRadius="8" BorderThickness="1"
-          BorderBrush="{theme['border']}" Background="{theme['surface']}"
-          Padding="10,8,10,8">
+  <Border x:Name="GlassClip" CornerRadius="{PANEL_CORNER_RADIUS:.0f}" BorderThickness="1"
+          Padding="{WINDOW_PADDING:.0f}" Opacity="1" RenderTransformOrigin="0.5,1">
+    <Border.BorderBrush>
+      <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="{theme['border_top']}" Offset="0.0"/>
+        <GradientStop Color="{theme['border_bot']}" Offset="1.0"/>
+      </LinearGradientBrush>
+    </Border.BorderBrush>
+    <Border.Background>
+      <SolidColorBrush Color="{theme['surface']}"/>
+    </Border.Background>
+    <Border.RenderTransform>
+      <TranslateTransform x:Name="SlideTransform" Y="0"/>
+    </Border.RenderTransform>
     {content}
   </Border>
 </Window>"""
@@ -686,21 +924,58 @@ def _run_panel_host_sta(state_loader, light_loader, fleet, signal_path, quit_pat
 
 def _create_window(data, ts, light, fleet, auto_present=True):
     from System import TimeSpan
-    from System.Windows import Duration, SystemParameters
-    from System.Windows.Interop import WindowInteropHelper
+    from System.Windows import Duration, LogicalTreeHelper, SystemParameters, UIElement
+    from System.Windows.Controls import Expander
+    from System.Windows.Interop import HwndSource, WindowInteropHelper
     from System.Windows.Markup import XamlReader
-    from System.Windows.Media import VisualTreeHelper
+    from System.Windows.Media import Colors, SolidColorBrush, VisualTreeHelper
     from System.Windows.Media.Animation import (
         CubicEase,
         DoubleAnimation,
         EasingMode,
         FillBehavior,
     )
+    from System.Windows.Media import TranslateTransform
     from System.Windows.Threading import DispatcherTimer
 
-    theme = _theme(light)
-    window = XamlReader.Parse(_xaml(data, ts, light, fleet))
+    want_acrylic = not _force_opaque()
+    theme = _theme(light, acrylic=want_acrylic)
+    window = XamlReader.Parse(_xaml(data, ts, light, fleet, acrylic=want_acrylic))
     glass_clip = window.FindName("GlassClip")
+    slide_transform = window.FindName("SlideTransform")
+    if slide_transform is None:
+        slide_transform = TranslateTransform()
+        glass_clip.RenderTransform = slide_transform
+    chrome = {"acrylic": False}
+
+    def zero_expansion_state(root):
+        """Capture disclosure state before a live content fragment is replaced."""
+        states = {}
+        stack = [root] if root is not None else []
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Expander):
+                tag = str(node.Tag or "")
+                if tag.startswith("ZeroUsage:"):
+                    states[tag] = bool(node.IsExpanded)
+            try:
+                stack.extend(child for child in LogicalTreeHelper.GetChildren(node) if child is not None)
+            except Exception:
+                pass
+        return states
+
+    def restore_zero_expansion(root, states):
+        stack = [root] if root is not None else []
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Expander):
+                tag = str(node.Tag or "")
+                if tag in states:
+                    node.IsExpanded = states[tag]
+            try:
+                stack.extend(child for child in LogicalTreeHelper.GetChildren(node) if child is not None)
+            except Exception:
+                pass
 
     def swap_content(new_data, new_ts):
         """Replace the panel's contents without touching the window or its HWND.
@@ -709,26 +984,61 @@ def _create_window(data, ts, light, fleet, auto_present=True):
         the old code paid that on every dismiss because it closed the window
         instead of hiding it. Parsing this fragment costs a few ms.
         """
-        fragment = XamlReader.Parse(_content_xaml(new_data, new_ts, light, fleet))
+        expanded = zero_expansion_state(glass_clip.Child)
+        fragment = XamlReader.Parse(
+            _content_xaml(new_data, new_ts, light, fleet, acrylic=chrome["acrylic"])
+        )
+        restore_zero_expansion(fragment, expanded)
         glass_clip.Child = fragment
         window.UpdateLayout()
         if window.IsVisible:
             position(anchor["rect"])
 
-    # No explicit rounded clip: it made the corner pixels transparent, and this
-    # window cannot carry per-pixel alpha, so they composited black. DWM already
-    # clips the window to its rounded shape.
+    # No explicit rounded clip: DWM already clips the HWND to its rounded shape.
+    # Per-pixel corner clips on a non-layered window paint black in the discarded
+    # samples, which is why the earlier clip attempts looked wrong.
     native = {"hwnd": 0}
 
     # WS_EX_TOOLWINDOW keeps this flyout out of Alt+Tab as well as the taskbar.
     def source_ready(sender, event):
-        hwnd = int(WindowInteropHelper(window).Handle.ToInt64())
+        helper = WindowInteropHelper(window)
+        hwnd = int(helper.Handle.ToInt64())
         get_style = ctypes.windll.user32.GetWindowLongW
         set_style = ctypes.windll.user32.SetWindowLongW
         exstyle = get_style(hwnd, -20)
         set_style(hwnd, -20, exstyle | 0x00000080)
         native["hwnd"] = hwnd
-        _apply_window_chrome(hwnd, light)
+        acrylic = _apply_window_chrome(hwnd, light)
+        chrome["acrylic"] = acrylic
+        source = HwndSource.FromHwnd(helper.Handle)
+        if acrylic and source is not None and source.CompositionTarget is not None:
+            # Non-layered transparent client: DWM acrylic shows through wherever
+            # WPF leaves alpha, without WS_EX_LAYERED (which system backdrops refuse).
+            source.CompositionTarget.BackgroundColor = Colors.Transparent
+            window.Background = SolidColorBrush(Colors.Transparent)
+        elif source is not None and source.CompositionTarget is not None:
+            # Acrylic refused: fall back to a solid panel so we never flash a
+            # see-through unreadable surface.
+            opaque = _theme(light, acrylic=False)
+            from System.Windows.Media import Color as WpfColor
+
+            def brush(hex_color):
+                value = hex_color.lstrip("#")
+                a = int(value[0:2], 16)
+                r = int(value[2:4], 16)
+                g = int(value[4:6], 16)
+                b = int(value[6:8], 16)
+                return SolidColorBrush(WpfColor.FromArgb(a, r, g, b))
+
+            window.Background = brush(opaque["surface"])
+            glass_clip.Background = brush(opaque["surface"])
+            glass_clip.BorderBrush = brush(opaque["border_top"])
+            source.CompositionTarget.BackgroundColor = WpfColor.FromArgb(
+                255,
+                int(opaque["surface"][3:5], 16),
+                int(opaque["surface"][5:7], 16),
+                int(opaque["surface"][7:9], 16),
+            )
 
     window.SourceInitialized += source_ready
 
@@ -766,33 +1076,77 @@ def _create_window(data, ts, light, fleet, auto_present=True):
 
     anchor = {"rect": None}
     closing = {"value": False}
-    animations = {"open": None, "close": None}
+    animations = {"open_y": None, "open_o": None, "close_y": None, "close_o": None}
+
+    def keep_anchor_on_resize(sender, event):
+        # SizeToContent grows upward from the tray when a quota disclosure opens.
+        # A missing tray rect makes position() fall back to the cursor. During an
+        # expander click that would move the flyout underneath the pointer.
+        if window.IsVisible and anchor["rect"] is not None:
+            position(anchor["rect"])
+
+    window.SizeChanged += keep_anchor_on_resize
 
     def ease(mode):
         curve = CubicEase()
         curve.EasingMode = mode
         return curve
 
+    def clear_motion():
+        slide_transform.BeginAnimation(TranslateTransform.YProperty, None)
+        glass_clip.BeginAnimation(UIElement.OpacityProperty, None)
+        slide_transform.Y = 0.0
+        glass_clip.Opacity = 1.0
+
+    def prepare_open():
+        """Park content below + faded while the HWND is still hidden."""
+        closing["value"] = False
+        clear_motion()
+        if SystemParameters.ClientAreaAnimation:
+            slide_transform.Y = SLIDE_DISTANCE
+            glass_clip.Opacity = 0.0
+        window.Opacity = 1.0
+
     def begin_open_slide():
+        """GPU-friendly content motion. Window stays put — no Top animation."""
         closing["value"] = False
         if not SystemParameters.ClientAreaAnimation:
+            clear_motion()
+            window.Opacity = 1.0
             return
-        top = window.Top
-        animation = DoubleAnimation(
-            top + 10.0,
-            top,
-            Duration(TimeSpan.FromMilliseconds(130)),
+        start_y = float(slide_transform.Y)
+        start_o = float(glass_clip.Opacity)
+        if start_y <= 0.01 and start_o >= 0.99:
+            clear_motion()
+            window.Opacity = 1.0
+            return
+        fraction = max(0.1, min(1.0, start_y / SLIDE_DISTANCE)) if SLIDE_DISTANCE > 0 else 1.0
+        duration_ms = max(30, int(OPEN_MS * fraction))
+        y_anim = DoubleAnimation(
+            start_y,
+            0.0,
+            Duration(TimeSpan.FromMilliseconds(duration_ms)),
         )
-        animation.EasingFunction = ease(EasingMode.EaseOut)
-        animation.FillBehavior = FillBehavior.Stop
-        animations["open"] = animation
-        window.BeginAnimation(window.TopProperty, animation)
+        y_anim.EasingFunction = ease(EasingMode.EaseOut)
+        y_anim.FillBehavior = FillBehavior.HoldEnd
+        o_anim = DoubleAnimation(
+            start_o,
+            1.0,
+            Duration(TimeSpan.FromMilliseconds(duration_ms)),
+        )
+        o_anim.EasingFunction = ease(EasingMode.EaseOut)
+        o_anim.FillBehavior = FillBehavior.HoldEnd
+        animations["open_y"] = y_anim
+        animations["open_o"] = o_anim
+        slide_transform.BeginAnimation(TranslateTransform.YProperty, y_anim)
+        glass_clip.BeginAnimation(UIElement.OpacityProperty, o_anim)
 
     if auto_present:
         def auto_open(sender, event):
             position()
             window.UpdateLayout()
-            window.Opacity = 1.0
+            prepare_open()
+            window.Show()
             begin_open_slide()
             window.Activate()
 
@@ -805,29 +1159,41 @@ def _create_window(data, ts, light, fleet, auto_present=True):
         rebuild both -- about 37 ms versus 6 ms to re-show the same window. That
         was most of what made repeated opens feel sluggish.
         """
-        window.BeginAnimation(window.TopProperty, None)
+        clear_motion()
         window.Hide()
         window.Opacity = 0.0
         closing["value"] = False
 
     def close_animated(*_):
-        if closing["value"] or not window.IsVisible:
+        if not window.IsVisible or closing["value"]:
             return
         closing["value"] = True
         if not SystemParameters.ClientAreaAnimation:
             dismiss()
             return
-        top = window.Top
-        animation = DoubleAnimation(
-            top,
-            top + 10.0,
-            Duration(TimeSpan.FromMilliseconds(100)),
+        start_y = float(slide_transform.Y)
+        start_o = float(glass_clip.Opacity)
+        fraction = max(0.1, min(1.0, (SLIDE_DISTANCE - start_y) / SLIDE_DISTANCE)) if SLIDE_DISTANCE > 0 else 1.0
+        duration_ms = max(30, int(CLOSE_MS * fraction))
+        y_anim = DoubleAnimation(
+            start_y,
+            SLIDE_DISTANCE,
+            Duration(TimeSpan.FromMilliseconds(duration_ms)),
         )
-        animation.EasingFunction = ease(EasingMode.EaseIn)
-        animation.FillBehavior = FillBehavior.Stop
-        animation.Completed += lambda sender, event: dismiss()
-        animations["close"] = animation
-        window.BeginAnimation(window.TopProperty, animation)
+        y_anim.EasingFunction = ease(EasingMode.EaseIn)
+        y_anim.FillBehavior = FillBehavior.HoldEnd
+        o_anim = DoubleAnimation(
+            start_o,
+            0.0,
+            Duration(TimeSpan.FromMilliseconds(duration_ms)),
+        )
+        o_anim.EasingFunction = ease(EasingMode.EaseIn)
+        o_anim.FillBehavior = FillBehavior.HoldEnd
+        o_anim.Completed += lambda sender, event: dismiss()
+        animations["close_y"] = y_anim
+        animations["close_o"] = o_anim
+        slide_transform.BeginAnimation(TranslateTransform.YProperty, y_anim)
+        glass_clip.BeginAnimation(UIElement.OpacityProperty, o_anim)
 
     if not os.environ.get("FLEET_PANEL_STAY"):
         window.KeyDown += lambda sender, event: close_animated() if str(event.Key) == "Escape" else None
@@ -894,12 +1260,16 @@ def _create_window(data, ts, light, fleet, auto_present=True):
     def present(anchor_rect=None):
         anchor["rect"] = anchor_rect
         if window.IsVisible:
-            close_animated()
+            if closing["value"]:
+                begin_open_slide()
+            else:
+                close_animated()
             return
         return _present_prepared_window(
             window,
             anchor_rect,
             position,
+            prepare_open,
             begin_open_slide,
         )
 

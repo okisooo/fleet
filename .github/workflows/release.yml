@@ -57,6 +57,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
+          generate_release_notes: true
           files: |
             dist/*-portable.zip
             dist/Fleet-Setup-*.exe

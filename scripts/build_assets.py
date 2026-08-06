@@ -2,10 +2,10 @@
 """Generate the packaged app's icon and Windows version resource.
 
 Both are build products, so they are generated here instead of committed. The
-icon is original artwork drawn with the same shapes the tray already renders;
-no vendor logo is used or redistributed.
+Fleet application icon is original artwork; provider identification artwork is
+tracked separately under assets/providers with its own third-party notice.
 
-Usage: python scripts/build_assets.py --version 0.1.0 --out build
+Usage: python scripts/build_assets.py --version 0.2.0 --out build
 """
 from __future__ import annotations
 

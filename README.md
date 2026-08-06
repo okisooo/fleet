@@ -2,10 +2,10 @@
 
 ![Fleet flyout](docs/screenshot.png)
 
-**One small Windows 11 tray app for every AI quota you pay for.**
+**One polished Windows 11 tray app for every AI quota you pay for.**
 
-Fleet watches local coding clients and public API accounts, then puts live usage,
-reset times, balances, and cached freshness one click away.
+Fleet watches local coding clients and public API accounts, then turns live usage,
+reset times, balances, and freshness into a glanceable flyout and tray meter.
 
 [![Latest release](https://img.shields.io/github/v/release/okisooo/fleet?label=download)](https://github.com/okisooo/fleet/releases/latest)
 [![CI](https://github.com/okisooo/fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/okisooo/fleet/actions/workflows/ci.yml)
@@ -40,19 +40,24 @@ or separate runtime is needed.
   Fireworks, Cerebras, DeepInfra, Nebius, xAI, and Perplexity.
 - Custom entries for gateways, proxies, and self-hosted endpoints.
 - Live, cached, and unavailable status for every provider.
-- Usage windows, percentage bars, reset countdowns, credits, and balances.
-- A compact notification-area flyout with no dashboard to keep open.
+- Spacious provider cards with full-width usage meters and reset countdowns.
+- Collapsible zero-use quota windows, so unused limits stay available without
+  overwhelming the main view.
+- Provider-logo tray tiles with a readable bottom meter for the current quota.
+- Credits and balances stay in the flyout instead of becoming meaningless tray
+  counters.
+- A compact notification-area experience with no dashboard to keep open.
 
-![Fleet status detail](docs/screenshot.png)
-
-Green means live. Amber means Fleet is showing the last successful reading and
-its age. Red means no usable reading exists.
+Blue meters are healthy, amber means pressure is building, and coral marks high
+usage. A provider badge is green when live, amber when Fleet is showing a cached
+reading, and red when no usable reading exists.
 
 ## Quick start
 
 1. Install a release from [GitHub Releases](https://github.com/okisooo/fleet/releases/latest).
 2. Sign in to the local clients you want Fleet to inspect.
-3. For API providers, set the matching environment variable and restart Fleet.
+3. For API providers, set the matching environment variable and choose
+   **Refresh now**.
 
 ```powershell
 setx OPENROUTER_API_KEY "your-key"
@@ -60,6 +65,9 @@ setx OPENROUTER_API_KEY "your-key"
 
 Left-click the tray icon to open or close the flyout. Right-click for **Refresh
 now** or **Quit**.
+
+The tray cycles only providers that expose a percentage quota. Balance-only
+providers such as OpenRouter remain in the flyout, where the amount is readable.
 
 See the complete provider list with:
 
@@ -130,6 +138,10 @@ machine. See [providers.example.json](providers.example.json) and
 Use Fleet only with accounts and machines you control. Review provider terms
 before using undocumented usage endpoints.
 
+Provider names and artwork identify compatible services and remain the property
+of their respective owners. Fleet is independent and is not endorsed by them.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## From source
 
 Requirements: Windows 11, Python 3.13+, and any local provider clients you want
@@ -153,10 +165,10 @@ Useful checks:
 
 ## Project status
 
-Fleet is an experimental public release. It currently targets Windows 11 and
-ships as version [v0.1.0](https://github.com/okisooo/fleet/releases/tag/v0.1.0).
-Provider APIs, authentication flows, and local client formats are outside Fleet's
-control; broken readings should be reported with provider name, Fleet version,
-and redacted debug output.
+Fleet is an early public release for Windows 11. Download the
+[latest release](https://github.com/okisooo/fleet/releases/latest) and see the
+[changelog](CHANGELOG.md) for version details. Provider APIs, authentication
+flows, and local client formats are outside Fleet's control; broken readings
+should be reported with provider name, Fleet version, and redacted debug output.
 
 Security reports: [SECURITY.md](SECURITY.md).

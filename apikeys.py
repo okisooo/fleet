@@ -135,8 +135,18 @@ def build_metrics(payload, specs, M):
         resets = resolve(payload, spec.get("resets")) if spec.get("resets") else None
         pct = extra = None
         if kind == "money":
-            extra = _money(resolve(payload, spec.get("value")),
-                           resolve(payload, spec.get("currency")) or spec.get("currency_literal"))
+            currency = resolve(payload, spec.get("currency")) or spec.get("currency_literal")
+            if spec.get("show_remaining_money") and (spec.get("used") is not None or spec.get("limit") is not None or spec.get("remaining") is not None):
+                # Remaining budget = limit - used, or a direct remaining path.
+                if spec.get("remaining"):
+                    rem = _number(resolve(payload, spec.get("remaining")))
+                else:
+                    used = _number(resolve(payload, spec.get("used")))
+                    limit = _number(resolve(payload, spec.get("limit")))
+                    rem = (limit - used) if limit is not None and used is not None else None
+                extra = _money(rem, currency)
+            else:
+                extra = _money(resolve(payload, spec.get("value")), currency)
             if not extra:
                 continue
         elif kind == "count":
@@ -162,9 +172,14 @@ def build_metrics(payload, specs, M):
                     used = None if remaining is None or total is None else total - remaining
                 pct = _pct(used, limit)
                 if pct is not None and spec.get("show_amounts"):
-                    extra = _money(used, spec.get("currency_literal")) if spec.get(
-                        "money_amounts"
-                    ) else _count(used, limit)
+                    if spec.get("show_remaining_money"):
+                        u, l = _number(used), _number(limit)
+                        rem = (l - u) if l is not None and u is not None else None
+                        extra = _money(rem, spec.get("currency_literal"))
+                    elif spec.get("money_amounts"):
+                        extra = _money(used, spec.get("currency_literal"))
+                    else:
+                        extra = _count(used, limit)
             if pct is None:
                 continue
             pct = max(0.0, min(100.0, pct))
@@ -181,16 +196,27 @@ BUILTIN = [
         "id": "openrouter",
         "label": "OpenRouter",
         "env": ["OPENROUTER_API_KEY"],
-        "url": "https://openrouter.ai/api/v1/key",
-        "plan": "data.is_free_tier",
-        "plan_map": {"True": "free", "False": "paid"},
+        "url": "https://openrouter.ai/api/v1/credits",
         "metrics": [
-            {"label": "Key cap", "kind": "pct", "used": "data.usage",
-             "limit": "data.limit", "resets": "data.limit_reset",
-             "show_amounts": True, "money_amounts": True},
-            {"label": "Spend mo", "kind": "money", "value": "data.usage_monthly"},
-            {"label": "Spend day", "kind": "money", "value": "data.usage_daily"},
+            # Just the remaining credit balance — no usage bar.
+            {"label": "Balance", "kind": "money", "used": "data.total_usage",
+             "limit": "data.total_credits", "show_remaining_money": True,
+             "currency_literal": "USD"},
         ],
+        # The account-wide credits endpoint accepts management keys only. A
+        # regular API key can still report its own remaining budget and spend.
+        "fallback": {
+            "statuses": [403],
+            "url": "https://openrouter.ai/api/v1/key",
+            "plan": "data.is_free_tier",
+            "plan_map": {"True": "free", "False": "paid"},
+            "metrics": [
+                {"label": "Balance", "kind": "money", "value": "data.limit_remaining",
+                 "currency_literal": "USD"},
+                {"label": "Spend mo", "kind": "money", "value": "data.usage_monthly",
+                 "currency_literal": "USD"},
+            ],
+        },
     },
     {
         "id": "deepseek",
@@ -370,11 +396,26 @@ def metrics_from_headers(headers, header_get, M):
 
 
 # ---------- collection ----------
-def _first_env(names):
+def _get_registry_env(name: str) -> str | None:
+    import sys
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ) as key:
+            value, _ = winreg.QueryValueEx(key, name)
+            return str(value) if value else None
+    except Exception:
+        return None
+
+
+def _first_env(names, environ=None):
+    use_registry = environ is None
+    env_map = os.environ if environ is None else environ
     for name in names or []:
-        value = os.environ.get(name)
-        if value and value.strip():
-            return name, value.strip()
+        value = env_map.get(name) or (_get_registry_env(name) if use_registry else None)
+        if value and str(value).strip():
+            return name, str(value).strip()
     return None, None
 
 
@@ -426,11 +467,11 @@ def _with_since(url, spec, query):
 def enabled_specs(config, environ=None):
     """Specs the user actually has keys for, plus their custom entries.
 
-    A built-in turns itself on as soon as its environment variable exists, so a
-    normal user sets one variable and restarts Fleet. Config can force a spec off,
-    point it at a different variable, or opt into a paid probe.
+    A built-in turns itself on as soon as its environment variable exists. On
+    Windows, values written by `setx` are also read from the user registry,
+    so the next poll can discover them without restarting Fleet. Config can force
+    a spec off, point it at a different variable, or opt into a paid probe.
     """
-    environ = os.environ if environ is None else environ
     settings = config.get("providers") or {}
     out = []
     for spec in BUILTIN:
@@ -438,7 +479,9 @@ def enabled_specs(config, environ=None):
         if not isinstance(user, dict):
             user = {}
         names = [user["env"]] if user.get("env") else spec.get("env") or []
-        has_key = any(environ.get(name, "").strip() for name in names)
+        # A real process lookup may also see values written by `setx` after
+        # Fleet started. Explicit mappings in tests/config checks stay isolated.
+        has_key = bool(_first_env(names, environ)[1])
         wants_probe = bool(user.get("probe"))
         if user.get("enabled") is False or not has_key:
             continue
@@ -531,6 +574,19 @@ def collect(spec, http, header_get, M, timeout=10):
     headers.setdefault("Accept", "application/json")
     headers.update(_auth_headers(spec, key))
     status, _, body = http("GET", url, headers, timeout=timeout)
+    response_spec = spec
+    fallback = spec.get("fallback") or {}
+    if status in (fallback.get("statuses") or []):
+        fallback_url = fallback.get("url")
+        refusal = _check_url(fallback_url or "", spec)
+        if refusal:
+            out["err"] = refusal
+            return out
+        fallback_url = _with_since(fallback_url, fallback, fallback.get("query"))
+        fallback_headers = dict(headers)
+        fallback_headers.update(fallback.get("headers") or {})
+        status, _, body = http("GET", fallback_url, fallback_headers, timeout=timeout)
+        response_spec = {**spec, **fallback}
     if status != 200:
         out["err"] = f"http {status}" if status else "offline"
         return out
@@ -544,8 +600,8 @@ def collect(spec, http, header_get, M, timeout=10):
     if not isinstance(payload, (dict, list)):
         out["err"] = "bad payload"
         return out
-    out["metrics"] = build_metrics(payload, spec.get("metrics") or [], M)
-    out["plan"] = _plan_text(spec, payload)
+    out["metrics"] = build_metrics(payload, response_spec.get("metrics") or [], M)
+    out["plan"] = _plan_text(response_spec, payload)
     if not out["metrics"]:
         out["err"] = "no usage fields"
     return out

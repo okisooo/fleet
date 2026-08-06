@@ -43,15 +43,17 @@ Rules for a new built-in:
 
 - Keep changes focused, and add a test next to the behaviour you change.
 - The full suite must pass: `python -m unittest discover -s tests -v`.
-- Do not commit `.cache/`, build output, screenshots of real usage data, or
-  vendor logo artwork. Provider marks are original monograms on purpose.
+- Do not commit `.cache/`, build output, or screenshots of real usage data.
+- Provider artwork must come from a documented provider-owned source and include
+  provenance plus the ownership/no-endorsement notice in
+  `THIRD_PARTY_NOTICES.md`.
 - Match the surrounding style: short modules, comments that explain *why* a
   Windows or provider quirk forced the code, not what the line does.
 
 ## building a release locally
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.1.0
+.\scripts\build-release.ps1 -Version 0.2.0
 ```
 
 That creates `.build-venv`, generates the app icon and version resource, builds
@@ -59,7 +61,7 @@ That creates `.build-venv`, generates the app icon and version resource, builds
 needs Inno Setup 6:
 
 ```powershell
-$env:FLEET_VERSION = "0.1.0"
+$env:FLEET_VERSION = "0.2.0"
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Fleet.iss
 ```
 
