@@ -172,3 +172,7 @@ flows, and local client formats are outside Fleet's control; broken readings
 should be reported with provider name, Fleet version, and redacted debug output.
 
 Security reports: [SECURITY.md](SECURITY.md).
+
+## More from OKISO
+
+[**Backdrop**](https://github.com/okisooo/backdrop) adds your own images and animated GIF wallpapers to Claude Desktop, Codex Desktop, and T3 Code, with blur and readability controls. [Explore more projects](https://github.com/okisooo).
