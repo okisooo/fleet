@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-labelledby="title desc">
+  <title id="title">Fleet</title>
+  <desc id="desc">the Fleet app mark: a pale F inside a dark disc with a green quota ring.</desc>
+  <!-- static vector adaptation of Fleet's original icon in scripts/build_assets.py. -->
+  <circle cx="48" cy="48" r="36" fill="#14151d"/>
+  <circle cx="48" cy="48" r="33" fill="none" stroke="#94a3b8" stroke-opacity=".41" stroke-width="10"/>
+  <circle cx="48" cy="48" r="33" fill="none" stroke="#22c55e" stroke-width="10" stroke-dasharray="138.23 207.35" transform="rotate(-90 48 48)"/>
+  <path d="M37 29h25v8H46v9h14v8H46v13h-9z" fill="#e8e8f0"/>
+</svg>
