@@ -1,21 +1,10 @@
-<p align="center">
-  <img src="docs/readme-mark.svg" width="88" height="88" alt="Fleet app mark">
-</p>
-
-<h1 align="center">Fleet</h1>
-
-<p align="center">
-  <strong>ai usage and quota tracker for Windows 11</strong><br>
-  your limits, reset times, and API balances — one tray away.
-</p>
+<p><a href="https://github.com/okisooo/fleet/releases/latest"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/okisooo/fleet/main/docs/fleet-sleeve-dark.svg">
+  <img src="https://raw.githubusercontent.com/okisooo/fleet/main/docs/fleet-sleeve-light.svg" alt="fleet — AI usage and quota tracker for Windows 11, one tray away. Fleet's ring mark stands in for the F; every reading is marked live, cached or unavailable; Claude Code, Codex, Grok CLI, Antigravity, OpenRouter, DeepSeek, Kimi, MiniMax, Z.AI and LiteLLM" width="900">
+</picture></a></p>
 
 <p align="center">
-  <a href="https://github.com/okisooo/fleet/releases/latest"><img src="https://img.shields.io/github/v/release/okisooo/fleet?style=flat-square&amp;color=22c55e" alt="latest release"></a>
-  <img src="https://img.shields.io/badge/Windows_11-x64-2563eb?style=flat-square" alt="Windows 11 x64">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b?style=flat-square" alt="MIT license"></a>
-</p>
-
-<p align="center">
+  <strong>ai usage and quota tracker for Windows 11</strong> · v0.2.0 · MIT<br>
   <a href="https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-Setup-0.2.0.exe">Windows installer</a> · <a href="https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-0.2.0-portable.zip">portable ZIP</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a>
 </p>
 
@@ -130,6 +119,7 @@ see [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## more from OKISO
 
-[**Backdrop**](https://github.com/okisooo/backdrop) adds custom images and animated
-GIF wallpapers to Claude Desktop, Codex Desktop, and T3 Code, with blur and
-readability controls. [more projects by OKISO](https://github.com/okisooo).
+Fleet is no.02 in OKISO's little tools. no.01, [**Backdrop**](https://github.com/okisooo/backdrop),
+adds custom images and animated GIF wallpapers to Claude Desktop, Codex Desktop, and
+T3 Code, with blur and readability controls. no.03, [**practice room**](https://github.com/okisooo/NihongoRevisionSuite),
+offers short Japanese practice rounds. [more projects by OKISO](https://github.com/okisooo).
