@@ -16,13 +16,18 @@
 </p>
 
 <p align="center">
-  <a href="#download">download</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a> · <a href="https://github.com/okisooo/fleet/issues/new?template=bug_report.yml">report a bug</a>
+  <a href="https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-Setup-0.2.0.exe">Windows installer</a> · <a href="https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-0.2.0-portable.zip">portable ZIP</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a>
 </p>
 
 track Claude Code, OpenAI Codex, Grok CLI, Google Antigravity, and API providers
 without opening each service. quota meters cycle in the Windows tray; the flyout
 brings usage, balances, and reset times together. readings are marked **live,
 cached, or unavailable**, so an older result stays visibly older.
+
+<p align="center">
+  <img src="docs/screenshot.png" width="320" height="592" alt="Fleet v0.2.0 flyout with Claude, Codex, Grok, and Antigravity quota meters, reset times, and an OpenRouter balance">
+  <br><sub>the public v0.2.0 screenshot; readings depend on your connected accounts.</sub>
+</p>
 
 ## download
 
@@ -42,11 +47,6 @@ to upgrade, rerun the installer or quit Fleet before replacing portable files.
 the v0.2.0 ZIP contains an older README and omits linked guides; use the
 [online setup](https://github.com/okisooo/fleet#quick-start) and
 [provider guide](https://github.com/okisooo/fleet/blob/main/docs/providers.md).
-
-<p align="center">
-  <img src="docs/screenshot.png" width="320" height="592" alt="Fleet v0.2.0 flyout with Claude, Codex, Grok, and Antigravity quota meters, reset times, and an OpenRouter balance">
-  <br><sub>the public v0.2.0 screenshot; readings depend on your connected accounts.</sub>
-</p>
 
 ## what you can track
 
