@@ -21,6 +21,9 @@ Python is bundled. local clients must be installed and signed in; API providers
 need keys. to upgrade, rerun the installer or quit Fleet before replacing
 portable files.
 
+for v0.2.0, follow the setup and provider guides here: the ZIP's older bundled
+README has outdated setup copy and links to documents omitted from the archive.
+
 > [!WARNING]
 > binaries are unsigned; Windows SmartScreen may show a reputation warning.
 > download from this repository's releases. SHA-256 checksums are in the
