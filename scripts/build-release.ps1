@@ -38,6 +38,11 @@ try {
     Copy-Item (Join-Path $root "LICENSE") $out
     Copy-Item (Join-Path $root "README.md") $out
     Copy-Item $thirdPartyNotices $out
+    Copy-Item (Join-Path $root "docs") $out -Recurse -Force
+    Copy-Item (Join-Path $root "providers.example.json") $out
+    Copy-Item (Join-Path $root "CHANGELOG.md") $out
+    Copy-Item (Join-Path $root "CONTRIBUTING.md") $out
+    Copy-Item (Join-Path $root "SECURITY.md") $out
     Compress-Archive -Path (Join-Path $out "*") -DestinationPath (Join-Path $root "dist\Fleet-$Version-portable.zip") -Force
     Write-Host "Built Fleet $Version"
 }
