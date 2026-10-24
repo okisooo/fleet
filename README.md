@@ -1,151 +1,106 @@
-# Fleet
+# Fleet — AI usage and quota tracker for Windows 11
 
-![Fleet flyout](docs/screenshot.png)
+track Claude Code, OpenAI Codex, Grok, Antigravity, and API balances from your
+Windows tray. Fleet shows quota meters, reset times, and reading freshness
+without opening each service.
 
-**One polished Windows 11 tray app for every AI quota you pay for.**
+**Windows 11 · x64 builds · [MIT license](LICENSE)**
 
-Fleet watches local coding clients and public API accounts, then turns live usage,
-reset times, balances, and freshness into a glanceable flyout and tray meter.
+[download](#download) · [setup](#quick-start) · [provider guide](docs/providers.md) · [report a bug](https://github.com/okisooo/fleet/issues/new?template=bug_report.yml)
 
-[![Latest release](https://img.shields.io/github/v/release/okisooo/fleet?label=download)](https://github.com/okisooo/fleet/releases/latest)
-[![CI](https://github.com/okisooo/fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/okisooo/fleet/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/okisooo/fleet)](LICENSE)
+## download
 
-> [!IMPORTANT]
-> Fleet is Windows-only. Provider endpoints and local credential formats can
-> change without notice. Fleet is independent and is not affiliated with any
-> provider listed below.
+**[v0.2.0 release notes](https://github.com/okisooo/fleet/releases/tag/v0.2.0)** · [check for the latest release](https://github.com/okisooo/fleet/releases/latest)
 
-## Download
+| download | how to use it |
+| --- | --- |
+| **[Windows installer — Fleet-Setup-0.2.0.exe](https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-Setup-0.2.0.exe)** | per-user install, no administrator prompt; optional start at sign-in |
+| **[portable ZIP — Fleet-0.2.0-portable.zip](https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-0.2.0-portable.zip)** | extract the archive and run `Fleet.exe` |
 
-Get the latest release from **[GitHub Releases](https://github.com/okisooo/fleet/releases/latest)**:
-
-- **Installer** — `Fleet-Setup-<version>.exe`; per-user install, no admin prompt.
-- **Portable ZIP** — unzip anywhere and run `Fleet.exe`.
-
-The installer can start Fleet when you sign in. No Python, terminal, provider CLI,
-or separate runtime is needed.
+Python is bundled. local clients must be installed and signed in; API providers
+need keys. to upgrade, rerun the installer or quit Fleet before replacing
+portable files.
 
 > [!WARNING]
-> Releases are currently unsigned. Windows SmartScreen may show a reputation
-> warning on first launch. Verify that your download came from the Fleet Releases
-> page.
+> binaries are unsigned; Windows SmartScreen may show a reputation warning.
+> download from this repository's releases. SHA-256 checksums are in the
+> [v0.2.0 release notes](https://github.com/okisooo/fleet/releases/tag/v0.2.0).
 
-## What Fleet shows
+![Fleet v0.2.0 flyout showing provider usage meters, reset times, and an OpenRouter balance](docs/screenshot.png)
 
-- Claude Code, Codex, Grok, and Antigravity local client usage.
-- Public API balances and limits from OpenRouter, DeepSeek, Kimi/Moonshot,
-  MiniMax, Z.AI, LiteLLM, OpenAI Admin, and Anthropic Admin APIs.
-- Optional rate-limit probes for OpenAI, Anthropic, Groq, Mistral, Together,
+*the public v0.2.0 screenshot; readings depend on your connected accounts.*
+
+## what Fleet shows
+
+- **local client quotas:** Claude Code, OpenAI Codex, Grok CLI, and Google
+  Antigravity, using the client credentials already on your machine.
+- **API balances and usage:** OpenRouter, DeepSeek, Kimi/Moonshot, MiniMax, Z.AI,
+  LiteLLM, and organisation cost reports with OpenAI or Anthropic admin keys.
+- **optional rate-limit probes:** OpenAI, Anthropic, Groq, Mistral, Together,
   Fireworks, Cerebras, DeepInfra, Nebius, xAI, and Perplexity.
-- Custom entries for gateways, proxies, and self-hosted endpoints.
-- Live, cached, and unavailable status for every provider.
-- Spacious provider cards with full-width usage meters and reset countdowns.
-- Collapsible zero-use quota windows, so unused limits stay available without
-  overwhelming the main view.
-- Provider-logo tray tiles with a readable bottom meter for the current quota.
-- Credits and balances stay in the flyout instead of becoming meaningless tray
-  counters.
-- A compact notification-area experience with no dashboard to keep open.
+- **custom providers:** map an HTTPS JSON usage endpoint for a gateway, proxy,
+  or self-hosted service through `providers.json`.
 
-Blue meters are healthy, amber means pressure is building, and coral marks high
-usage. A provider badge is green when live, amber when Fleet is showing a cached
-reading, and red when no usable reading exists.
+quota providers cycle in the tray; balances stay in the flyout. repeated zero-use
+windows collapse. readings are marked **live, cached, or unavailable**, with
+reset times where available.
 
-## Quick start
+support and available metrics vary by provider; see the
+[provider matrix, requirements, and limitations](docs/providers.md).
 
-1. Install a release from [GitHub Releases](https://github.com/okisooo/fleet/releases/latest).
-2. Sign in to the local clients you want Fleet to inspect.
-3. For API providers, set the matching environment variable and choose
-   **Refresh now**.
+## quick start
 
-```powershell
-setx OPENROUTER_API_KEY "your-key"
-```
+1. install or extract Fleet, then launch `Fleet.exe`.
+2. sign in to your local clients on the same Windows account. keep Claude Code
+   on `PATH` for login renewal.
+3. for API providers, set the matching environment variable, then choose
+   **Refresh now** from Fleet's tray menu. for example:
 
-Left-click the tray icon to open or close the flyout. Right-click for **Refresh
-now** or **Quit**.
+   ```powershell
+   setx OPENROUTER_API_KEY "your-key"
+   ```
 
-The tray cycles only providers that expose a percentage quota. Balance-only
-providers such as OpenRouter remain in the flyout, where the amount is readable.
+left-click to toggle the flyout; right-click for **Refresh now** or **Quit**.
+check Windows' tray overflow if the icon is hidden.
 
-See the complete provider list with:
+API usage endpoints activate when their key is available. **rate-limit probes
+are off by default:** `"probe": true` sends a one-token inference request each
+poll and may cost money.
 
-```powershell
-Fleet.exe --providers
-```
+custom endpoints and overrides go in `%LOCALAPPDATA%\Fleet\providers.json`
+(packaged) or `providers.json` beside `fleet.py` (source). keys stay in environment
+variables. see the [setup guide](docs/providers.md) and
+[example configuration](providers.example.json).
 
-## Public API keys
+## troubleshooting and feedback
 
-Fleet reads API keys from environment variables. It never puts key values in
-`providers.json`.
+- **missing or stale reading:** check client sign-in or API-key setup, then
+  choose **Refresh now**. cached readings retain an older result.
+- **unexpected balance:** check the [provider guide](docs/providers.md#built-in).
+  OpenRouter management keys show account credits; regular keys use a
+  key budget/spend fallback.
+- **still stuck:** [report a bug](https://github.com/okisooo/fleet/issues/new?template=bug_report.yml)
+  with Fleet version, install type, Windows build, provider, and expected versus
+  actual behaviour. redact diagnostics before sharing.
 
-Free, read-only usage endpoints activate automatically when their key exists.
-Providers whose quota is exposed only through inference response headers are
-disabled by default because checking them sends a one-token request. Enable those
-with `"probe": true` in `providers.json` only when you accept that request and its
-possible cost.
+never post tokens, credential files, `.cache` contents, or provider response
+bodies. suspected security issues follow the private reporting guidance in
+[SECURITY.md](SECURITY.md).
 
-Full provider matrix and setup details: [docs/providers.md](docs/providers.md).
+## privacy and compatibility
 
-## Custom providers
+Fleet has no telemetry or Fleet backend. it reads local credentials and contacts
+providers directly; authentication flows may refresh those credentials.
+runtime state lives in `%LOCALAPPDATA%\Fleet\.cache` (packaged) or `.cache` (source).
 
-Create `%LOCALAPPDATA%\Fleet\providers.json` beside the packaged app state, or
-`providers.json` in the repository when running from source:
+this is an early public Windows 11 release; provider APIs and credential formats
+can change without notice. Fleet is independent of the listed providers, whose
+names and artwork remain theirs. see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-```json
-{
-  "custom": [
-    {
-      "id": "my-gateway",
-      "label": "My Gateway",
-      "url": "https://gateway.example.com/usage",
-      "env": "MY_GATEWAY_API_KEY",
-      "metrics": [
-        {
-          "label": "Monthly",
-          "kind": "pct",
-          "used": "usage.month",
-          "limit": "limits.month",
-          "resets": "limits.reset_at"
-        }
-      ]
-    }
-  ]
-}
-```
+## run from source
 
-Custom requests use HTTPS, bearer authentication, a bounded response, and safe
-JSON field paths. Loopback HTTP is allowed for a proxy running on your own
-machine. See [providers.example.json](providers.example.json) and
-[docs/providers.md](docs/providers.md) for all mapping types.
-
-## Privacy and safety
-
-- No Fleet telemetry or Fleet backend.
-- Credentials are read locally and sent only to the matching provider endpoint.
-- Custom provider key values come from environment variables, never config files.
-- Runtime cache lives in `%LOCALAPPDATA%\Fleet\.cache` for packaged builds and
-  `.cache` for source builds.
-- Claude refresh is delegated to Claude Code. Fleet does not ship copied OAuth
-  client secrets.
-- Antigravity uses its local language server when available. If the app is closed,
-  Fleet can refresh a stored Antigravity token using OAuth metadata discovered
-  from the local installation; that metadata is never bundled, logged, or stored
-  by Fleet.
-- `--debug` prints status and exception types, never tokens or response bodies.
-
-Use Fleet only with accounts and machines you control. Review provider terms
-before using undocumented usage endpoints.
-
-Provider names and artwork identify compatible services and remain the property
-of their respective owners. Fleet is independent and is not endorsed by them.
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## From source
-
-Requirements: Windows 11, Python 3.13+, and any local provider clients you want
-to inspect.
+requires Windows 11, Git, and 64-bit Python 3.13 (used by CI). the flyout uses
+Windows' .NET Framework/WPF. configure providers as above.
 
 ```powershell
 git clone https://github.com/okisooo/fleet.git
@@ -155,24 +110,18 @@ py -3.13 -m venv .venv
 .\fleet-tray.cmd
 ```
 
-Useful checks:
+source diagnostics, without opening the flyout:
 
 ```powershell
+.\.venv\Scripts\python.exe fleet.py --providers
 .\.venv\Scripts\python.exe tray.py --dry
-.\.venv\Scripts\python.exe fleet.py --once
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-## Project status
+`--providers` lists API-key configuration; `--dry` polls and prints readings.
+see [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
-Fleet is an early public release for Windows 11. Download the
-[latest release](https://github.com/okisooo/fleet/releases/latest) and see the
-[changelog](CHANGELOG.md) for version details. Provider APIs, authentication
-flows, and local client formats are outside Fleet's control; broken readings
-should be reported with provider name, Fleet version, and redacted debug output.
+## more from OKISO
 
-Security reports: [SECURITY.md](SECURITY.md).
-
-## More from OKISO
-
-[**Backdrop**](https://github.com/okisooo/backdrop) adds your own images and animated GIF wallpapers to Claude Desktop, Codex Desktop, and T3 Code, with blur and readability controls. [Explore more projects](https://github.com/okisooo).
+[**Backdrop**](https://github.com/okisooo/backdrop) adds custom images and animated
+GIF wallpapers to Claude Desktop, Codex Desktop, and T3 Code, with blur and
+readability controls. [explore more projects by OKISO](https://github.com/okisooo).
