@@ -7,8 +7,9 @@ Security fixes land on the default branch.
 ## reporting a vulnerability
 
 Do not open a public issue for a suspected credential leak, token disclosure,
-or local privilege problem. Contact the repository owner privately with a
-minimal reproduction and affected version.
+or local privilege problem. Contact the repository owner privately through
+[the published contact page](https://okiso.net/links), with a minimal
+reproduction and affected version.
 
 Do not include live tokens, credential files, `.cache` contents, browser data,
 or provider session logs in a report.
