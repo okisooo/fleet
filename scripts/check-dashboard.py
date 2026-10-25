@@ -23,6 +23,7 @@ from System.Windows import Application, LogicalTreeHelper, Point, PresentationSo
 from System.Windows.Controls import TextBlock
 from System.Windows.Automation import AutomationProperties
 from System.Windows.Input import Key, KeyEventArgs, Keyboard
+from System.Windows.Interop import WindowInteropHelper
 from System.Windows.Threading import DispatcherFrame, DispatcherTimer
 from System import TimeSpan, EventHandler
 
@@ -63,11 +64,13 @@ def verify():
         parent=Activator.CreateInstance(assembly.GetType('FleetPanel.PanelWindow'),Array[Object]([str(scratch.resolve())]))
         call(parent,'Start');pump(1200)
         view=field(parent,'view');root=view.GetType().GetProperty('Root').GetValue(view)
+        handle=WindowInteropHelper(parent).Handle
         press(root,'Dashboard');pump()
         assert field(view,'page')=='dashboard'
         assert app.Windows.Count==1 and assembly.GetType('FleetPanel.DashboardWindow') is None
         assert parent.Left < -10000 and parent.Top < -10000
         assert view.GetType().GetProperty('Root').GetValue(view)==root
+        assert WindowInteropHelper(parent).Handle==handle and not parent.ShowInTaskbar
         checks.append('Dashboard changes the existing popup page; one window and the same root')
         scroll=field(view,'scroller')
         scroll.ScrollToVerticalOffset(260);parent.UpdateLayout();pump()
