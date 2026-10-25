@@ -14,7 +14,7 @@ def usage():
         "projects": [{"name": "Project " + str(i), "cost": i} for i in range(8)],
         "unpriced": 2,
     }, "coverage": {"files": 41, "pending_files": 0, "skipped_zst": 3,
-                     "updated": 1000, "since": 100, "secret": "never export me"}}
+                     "updated": 1000, "since": 100, "raw_response": "never export me"}}
 
 
 class DashboardHistoryTests(unittest.TestCase):
@@ -43,7 +43,7 @@ class DashboardHistoryTests(unittest.TestCase):
     def test_coverage_is_allowlisted_without_raw_payload_fields(self):
         model = self.model()
         self.assertEqual(model["coverage"]["skipped_zst"], 3)
-        self.assertNotIn("secret", model["coverage"])
+        self.assertNotIn("raw_response", model["coverage"])
         self.assertNotIn("never export me", json.dumps(model))
 
     def test_compact_api_rows_remain_available_to_the_dashboard(self):
