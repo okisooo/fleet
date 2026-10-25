@@ -16,12 +16,14 @@ scratch.mkdir(parents=True, exist_ok=True)
 import clr
 for name in ('WindowsBase','PresentationCore','PresentationFramework'):
     clr.AddReference(str(Path(r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF')/(name+'.dll')))
-from System import Activator, Array, Object
+from System import Activator, Array, Boolean, Int32, IntPtr, Object
 from System.Reflection import Assembly, BindingFlags
 from System.Threading import ApartmentState, Thread, ThreadStart
-from System.Windows import Application, LogicalTreeHelper, PresentationSource, ShutdownMode
+from System.Windows import Application, LogicalTreeHelper, Point, PresentationSource, ShutdownMode
+from System.Windows.Controls import TextBlock
 from System.Windows.Automation import AutomationProperties
 from System.Windows.Input import Key, KeyEventArgs, Keyboard
+from System.Windows.Interop import WindowInteropHelper
 from System.Windows.Threading import DispatcherFrame, DispatcherTimer
 from System import TimeSpan, EventHandler
 
@@ -62,42 +64,58 @@ def verify():
         parent=Activator.CreateInstance(assembly.GetType('FleetPanel.PanelWindow'),Array[Object]([str(scratch.resolve())]))
         call(parent,'Start');pump(1200)
         view=field(parent,'view');root=view.GetType().GetProperty('Root').GetValue(view)
+        handle=WindowInteropHelper(parent).Handle
         press(root,'Dashboard');pump()
-        dashboard=field(parent,'dashboard')
-        assert dashboard is not None and dashboard.IsVisible
-        assert dashboard.Left < -10000 and dashboard.Top < -10000
-        checks.append('Enter on the flyout Dashboard button opens an offscreen native window')
-        press(root,'Dashboard');pump()
-        assert field(parent,'dashboard')==dashboard
-        checks.append('repeated clicks reuse the same dashboard')
-        dashboard.Width=760;pump(350)
-        assert field(dashboard,'columns')==1
-        dashboard.Width=1120;pump(350)
-        assert field(dashboard,'columns')==2
-        checks.append('resize switches between one and two columns')
-        scroll=field(dashboard,'scroll')
-        scroll.ScrollToVerticalOffset(260);dashboard.UpdateLayout();pump()
+        assert field(view,'page')=='dashboard'
+        assert app.Windows.Count==1 and assembly.GetType('FleetPanel.DashboardWindow') is None
+        assert parent.Left < -10000 and parent.Top < -10000
+        assert view.GetType().GetProperty('Root').GetValue(view)==root
+        assert WindowInteropHelper(parent).Handle==handle and not parent.ShowInTaskbar
+        checks.append('Dashboard changes the existing popup page; one window and the same root')
+        scroll=field(view,'scroller')
+        scroll.ScrollToVerticalOffset(260);parent.UpdateLayout();pump()
         offset=scroll.VerticalOffset
+        assert offset>0
         updated=json.loads(sample.read_text());updated['ts']=time.time()+1
         (scratch/'panel.json').write_text(json.dumps(updated),encoding='utf-8')
         call(parent,'LoadModel');pump()
-        assert abs(scroll.VerticalOffset-offset)<2
-        checks.append('model refresh preserves scroll position')
-        press(dashboard.Content,'Refresh')
+        assert field(view,'page')=='dashboard' and abs(scroll.VerticalOffset-offset)<2
+        checks.append('data refresh preserves the dashboard page and scroll position')
+        press(root,'Refresh usage now')
         assert (scratch/'refresh.request').exists()
-        checks.append('dashboard Refresh requests collection through the tray')
-        call(dashboard,'ChangeTheme',False);pump()
-        assert not field(dashboard,'light')
-        assert abs(field(dashboard,'scroll').VerticalOffset-offset)<2
-        checks.append('theme changes retain the window and scroll position')
-        assert (scratch/'panel.visible').exists()
-        dashboard.Close();pump()
-        assert field(parent,'dashboard') is None
+        checks.append('the popup header Refresh still requests collection')
+        press(root,'Back to usage');pump()
+        assert field(view,'page')=='usage' and scroll.VerticalOffset<2
         press(root,'Dashboard');pump()
-        assert field(parent,'dashboard') is not None
-        checks.append('closing and reopening creates one clean dashboard')
+        assert field(view,'page')=='dashboard' and scroll.VerticalOffset<2
+        checks.append('Dashboard and Back reset scroll on navigation')
+        for element in walk(root):
+            if isinstance(element,TextBlock) and element.ActualWidth>0:
+                right=element.TranslatePoint(Point(element.ActualWidth,0),root).X
+                assert right<=root.ActualWidth-28+1, ('text extends past popup',element.Text,right)
+                if element.Text.startswith('$') or (element.Text[:1].isdigit() and len(element.Text)<12):
+                    assert element.ActualHeight < element.FontSize*1.9, ('numeric cell wraps',element.Text)
+        checks.append('dashboard text and numeric cells fit the popup column')
+        press(root,'Back to usage');pump()
+        args=Array[Object]([IntPtr.Zero,Int32(0x8049),IntPtr.Zero,IntPtr.Zero,Boolean(False)])
+        parent.GetType().GetMethod('OnMessage',flags).Invoke(parent,args);pump()
+        assert field(view,'page')=='dashboard' and app.Windows.Count==1
+        checks.append('the tray dashboard message selects the same popup page')
+        press(root,'Back to usage');pump()
+        (scratch/'dashboard.show').write_text('fresh request')
+        call(parent,'OnSignalTick');pump()
+        assert field(view,'page')=='dashboard' and app.Windows.Count==1
+        press(root,'Back to usage');pump()
+        (scratch/'dashboard.show').write_text('old request')
+        os.utime(scratch/'dashboard.show',(time.time()-30,time.time()-30))
+        call(parent,'OnSignalTick')
+        assert field(view,'page')=='usage' and not (scratch/'dashboard.show').exists()
+        checks.append('fresh file requests select Dashboard; stale requests are ignored')
+        call(parent,'Finish');pump()
+        assert field(view,'page')=='usage' and scroll.VerticalOffset<2
+        assert app.Windows.Count==1
         assert not (scratch/'panel-error.log').exists()
-        checks.append('no native errors; all actions use isolated sample data')
+        checks.append('closing resets to usage; no extra window or native error')
     except Exception as error:
         checks.append('FAILED: '+str(error))
     finally:

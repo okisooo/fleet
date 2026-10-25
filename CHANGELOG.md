@@ -1,5 +1,16 @@
 # changelog
 
+## 0.4.1 - 2026-10-26
+
+- changed **Dashboard** to switch pages inside the existing tray popup. removed
+  the separate desktop window and its taskbar entry.
+- kept Back, Refresh and Settings visible while the dashboard scrolls. page
+  navigation resets scroll; fresh data preserves the current dashboard position.
+- fitted the summary, charts and token tables to the popup's existing width,
+  using the same acrylic, typography and controls as the main usage page.
+- kept expanded local history, full reported limits, coverage notes and privacy
+  behavior from 0.4.0. stale launch requests no longer reopen the popup later.
+
 ## 0.4.0 - 2026-10-26
 
 - added a **Dashboard** button to the native flyout and tray menu. it opens one

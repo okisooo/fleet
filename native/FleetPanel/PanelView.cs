@@ -63,6 +63,7 @@ namespace FleetPanel
         private readonly Image backdrop = new Image { Stretch = Stretch.Fill };
         private readonly GlassEffect glass;
         private readonly StackPanel content = new StackPanel();
+        private readonly StackPanel navigation = new StackPanel();
         private readonly ScrollViewer scroller;
         private readonly TranslateTransform lift = new TranslateTransform();
         private readonly List<Action> tickers = new List<Action>();
@@ -80,7 +81,6 @@ namespace FleetPanel
         private EventHandler counting;
 
         public event Action RefreshClicked;
-        public event Action DashboardRequested;
         /// <summary>Raised once the open animation settles, with its measured frame pacing.</summary>
         public event Action<string> IntroMeasured;
         /// <summary>A fix the user asked for: "claude-sign-in", "grok-renew".</summary>
@@ -158,7 +158,11 @@ namespace FleetPanel
                 PanningMode = PanningMode.VerticalOnly,
                 Focusable = false,
             };
-            card.Children.Add(new Border { Padding = new Thickness(Pad, 8, Pad, 10), Child = scroller });
+            var pages = new DockPanel();
+            DockPanel.SetDock(navigation, Dock.Top);
+            pages.Children.Add(navigation);
+            pages.Children.Add(scroller);
+            card.Children.Add(new Border { Padding = new Thickness(Pad, 8, Pad, 10), Child = pages });
 
             card.SizeChanged += (s, e) => Reframe();
             Root.SizeChanged += (s, e) => Reframe();
@@ -234,12 +238,20 @@ namespace FleetPanel
             // A scheduled data push must not erase a key while the user types.
             if (page == "settings" && apiEditing != "") return;
             if (apiFeedback == "Key saved. Checking connection…") apiFeedback = "";
-            Rebuild();
+            Rebuild(keepScroll: true);
         }
 
         public void ShowSettings()
         {
             page = "settings";
+            Rebuild();
+        }
+
+        public void ShowDashboard()
+        {
+            ClearApiEditor();
+            page = "dashboard";
+            selected = "";
             Rebuild();
         }
 
@@ -252,6 +264,7 @@ namespace FleetPanel
                 selected = "";
                 Rebuild();
             }
+            else scroller.ScrollToTop();
         }
 
         public void ClearApiEditor()
@@ -268,18 +281,31 @@ namespace FleetPanel
             Rebuild();
         }
 
-        private void Rebuild()
+        private void Rebuild(bool keepScroll = false)
         {
+            var offset = keepScroll ? scroller.VerticalOffset : 0;
             apiInput?.Clear();
             apiInput = null;
             content.Children.Clear();
+            navigation.Children.Clear();
             tickers.Clear();
             sections.Clear();
+            scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+            if (page == "dashboard")
+            {
+                navigation.Children.Add(Header("Dashboard", back: true));
+                content.Children.Add(DashboardPage());
+                Tick();
+                scroller.UpdateLayout();
+                scroller.ScrollToVerticalOffset(offset);
+                return;
+            }
             if (page == "settings")
             {
                 content.Children.Add(Header("Settings", back: true));
                 content.Children.Add(SettingsPage());
                 Tick();
+                scroller.ScrollToVerticalOffset(offset);
                 return;
             }
             content.Children.Add(Header("Fleet", back: false));
@@ -309,6 +335,7 @@ namespace FleetPanel
             content.Children.Add(Divider());
             content.Children.Add(Footer());
             Tick();
+            scroller.ScrollToVerticalOffset(offset);
         }
 
         // ---------- motion ----------
@@ -432,12 +459,15 @@ namespace FleetPanel
             }
             left.Children.Add(Text(title, 14, theme.Text, FontWeights.SemiBold));
             grid.Children.Add(left);
-            if (!back)
+            if (!back || page == "dashboard")
             {
                 var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-                var dashboard = Button("Dashboard", "Open the full usage dashboard", () => DashboardRequested?.Invoke());
-                dashboard.Margin = new Thickness(0, 0, 8, 0);
-                actions.Children.Add(dashboard);
+                if (!back)
+                {
+                    var dashboard = Button("Dashboard", "View more usage in this popup", ShowDashboard);
+                    dashboard.Margin = new Thickness(0, 0, 8, 0);
+                    actions.Children.Add(dashboard);
+                }
                 var refresh = IconButton("", "Refresh usage now", () => { Spin(); RefreshClicked?.Invoke(); });
                 ((TextBlock)refresh.Child).RenderTransformOrigin = new Point(0.5, 0.5);
                 ((TextBlock)refresh.Child).RenderTransform = spin;
@@ -1530,8 +1560,12 @@ namespace FleetPanel
             var button = new Border
             {
                 Width = 32, Height = 32, CornerRadius = new CornerRadius(4), Background = Brushes.Transparent,
-                Cursor = Cursors.Hand, Child = text, ToolTip = name,
+                Cursor = Cursors.Hand, Child = text, ToolTip = name, Focusable = true,
             };
+            button.KeyDown += (s, e) => { if (e.Key == Key.Enter || e.Key == Key.Space) { click(); e.Handled = true; } };
+            button.GotKeyboardFocus += (s, e) => button.Background = Brush(theme.Hover);
+            button.LostKeyboardFocus += (s, e) => button.Background = Brushes.Transparent;
+            AutomationName(button, name);
             ToolTipService.SetInitialShowDelay(button, 600);
             button.MouseEnter += (s, e) => button.Background = Brush(theme.Hover);
             button.MouseLeave += (s, e) => button.Background = Brushes.Transparent;

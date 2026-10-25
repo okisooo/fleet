@@ -9,65 +9,50 @@ using System.Windows.Media;
 
 namespace FleetPanel
 {
-    // A separate layout using the flyout's type, colours, buttons and meter helpers.
-    // It never changes the flyout's fixed-width frame or screen-capture surface.
+    // The detailed page inside the same fixed-width tray flyout.
     internal sealed partial class PanelView
     {
-        public FrameworkElement DashboardHeader(Action settings)
+        private FrameworkElement DashboardPage()
         {
-            var header = new DockPanel { Margin = new Thickness(28, 18, 28, 16), LastChildFill = true };
-            var actions = new StackPanel { Orientation = Orientation.Horizontal };
-            var refresh = Button("Refresh", "Refresh all provider readings", () => RefreshClicked?.Invoke());
-            refresh.Margin = new Thickness(0, 0, 8, 0);
-            actions.Children.Add(refresh);
-            actions.Children.Add(Button("Settings", "Open Fleet settings", settings));
-            DockPanel.SetDock(actions, Dock.Right);
-            header.Children.Add(actions);
-            header.Children.Add(Text("Fleet dashboard", 22, theme.Text, FontWeights.SemiBold));
-            return header;
-        }
-
-        public FrameworkElement Dashboard(PanelData next, double width)
-        {
-            data = next ?? new PanelData();
-            updated = data.Ts;
-            tickers.Clear();
-            var page = new StackPanel { Margin = new Thickness(28, 0, 28, 24) };
+            var body = new StackPanel { Margin = new Thickness(0, 4, 0, 4) };
             var status = Text("", 12, theme.TextSecondary);
             status.Margin = new Thickness(0, 0, 0, 12);
             tickers.Add(() => status.Text = data.Live + " live · " + data.Cached + " cached · Updated " + Clock.Ago(data.Ts));
-            page.Children.Add(status);
+            body.Children.Add(status);
             var stale = DashNote("Readings are older than two minutes. Fleet may be offline or still collecting. Try Refresh.");
-            tickers.Add(() => stale.Visibility = Clock.Now() - data.Ts > 120 ? Visibility.Visible : Visibility.Collapsed);
-            page.Children.Add(stale);
+            tickers.Add(() => stale.Visibility = data.Ts > 0 && Clock.Now() - data.Ts > 120 ? Visibility.Visible : Visibility.Collapsed);
+            body.Children.Add(stale);
 
             var history = data.History.Where(p => p.Spend != null).ToList();
             if (!data.Cost || data.Summary?.State == "off")
-                page.Children.Add(DashNote("Local usage estimates are turned off. Enable API-price estimates in Settings to see activity and token history."));
+                body.Children.Add(DashNote("Local usage estimates are turned off. Enable API-price estimates in Settings to see activity and token history."));
             else if (data.Summary?.State == "indexing")
-                page.Children.Add(DashNote("Reading local agent logs… Provider limits remain available while history is indexed."));
+                body.Children.Add(DashNote("Reading local agent logs… Provider limits remain available while history is indexed."));
             else if (history.Count == 0)
-                page.Children.Add(DashNote("No local token history yet. Activity and API-price estimates appear after Claude Code or Codex writes usage to its local logs."));
+                body.Children.Add(DashNote("No local token history yet. Activity and API-price estimates appear after Claude Code or Codex writes usage to its local logs."));
             else
             {
-                page.Children.Add(DashTitle("API value from local logs"));
+                body.Children.Add(DashTitle("API value from local logs"));
                 var band = new Grid { Margin = new Thickness(0, 6, 0, 12) };
+                band.ColumnDefinitions.Add(new ColumnDefinition());
+                band.ColumnDefinitions.Add(new ColumnDefinition());
                 var totals = new[] { history.Sum(p => p.Spend.Today?.Cost ?? 0), history.Sum(p => p.Spend.Week?.Cost ?? 0), history.Sum(p => p.Spend.Month?.Cost ?? 0), history.Sum(p => p.Spend.Today?.Tokens ?? 0) };
                 var labels = new[] { "Today", "Last 7 days", "Last 30 days", "Tokens today" };
                 for (var i = 0; i < labels.Length; i++)
                 {
-                    band.ColumnDefinitions.Add(new ColumnDefinition());
-                    var cell = new StackPanel { Margin = new Thickness(0, 0, 16, 0) };
+                    if (i % 2 == 0) band.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                    var cell = new StackPanel { Margin = new Thickness(0, 0, 12, 10) };
                     cell.Children.Add(Text(labels[i], 12, theme.TextSecondary));
-                    cell.Children.Add(Text(i == 3 ? Format.Tokens(totals[i]) : Format.Money(totals[i]), 28, theme.Text, FontWeights.SemiBold, tabular: true));
-                    Grid.SetColumn(cell, i);
+                    cell.Children.Add(Text(i == 3 ? Format.Tokens(totals[i]) : Format.Money(totals[i]), 22, theme.Text, FontWeights.SemiBold, tabular: true));
+                    Grid.SetColumn(cell, i % 2);
+                    Grid.SetRow(cell, i / 2);
                     band.Children.Add(cell);
                 }
-                page.Children.Add(band);
+                body.Children.Add(band);
                 var basis = Text("Claude Code and Codex tokens at API list prices. Subscriptions are not billed per token.", 12, theme.TextSecondary);
                 basis.TextWrapping = TextWrapping.Wrap;
                 basis.Margin = new Thickness(0, 0, 0, 20);
-                page.Children.Add(basis);
+                body.Children.Add(basis);
                 var charts = new List<FrameworkElement>();
                 var days = history.SelectMany(p => p.Spend.Daily).GroupBy(d => d.Label).OrderBy(g => g.Key)
                     .Select(g => new Day { Label = g.Key, Cost = g.Sum(d => d.Cost), Tokens = g.Sum(d => d.Tokens) }).ToList();
@@ -75,13 +60,13 @@ namespace FleetPanel
                     charts.Add(DashChart("Daily activity · last 14 days", days, days[0].Label, days[days.Count - 1].Label));
                 var hours = Enumerable.Range(0, 24).Select(i => new Day { Label = (24 - i) + " h ago", Cost = history.Sum(p => p.Spend.Hourly.ElementAtOrDefault(i)) }).ToList();
                 charts.Add(DashChart("Hourly activity · last 24 hours", hours, "24 h ago", "now"));
-                page.Children.Add(DashColumns(charts, width));
+                body.Children.Add(DashStack(charts));
             }
 
-            page.Children.Add(DashTitle("Providers and limits"));
+            body.Children.Add(DashTitle("Providers and limits"));
             if (data.Providers.Count == 0 && data.Inactive.Count == 0)
-                page.Children.Add(DashNote("No providers connected yet. Sign in to a supported client or connect a Claude API key in Settings."));
-            page.Children.Add(DashColumns(data.Providers.Select(DashProvider).ToList(), width));
+                body.Children.Add(DashNote("No providers connected yet. Sign in to a supported client or connect a Claude API key in Settings."));
+            body.Children.Add(DashStack(data.Providers.Select(DashProvider).ToList()));
             foreach (var item in data.Inactive)
             {
                 var row = new DockPanel { Margin = new Thickness(0, 8, 0, 8) };
@@ -93,37 +78,44 @@ namespace FleetPanel
                 }
                 var note = Text(item.Name + " · " + item.Label, 13, theme.TextSecondary);
                 note.TextWrapping = TextWrapping.Wrap; note.ToolTip = item.Tooltip;
-                row.Children.Add(note); page.Children.Add(row);
+                row.Children.Add(note); body.Children.Add(row);
             }
 
             if (history.Count > 0)
             {
-                page.Children.Add(DashTitle("Local usage detail"));
+                body.Children.Add(DashTitle("Local usage detail"));
                 foreach (var provider in history)
                 {
                     var spend = provider.Spend;
                     var detail = new StackPanel();
-                    var table = DashTable(new[] { "Period", "API value", "Input", "Output", "Cache read", "Cache write" }, 1.4, 1, 1, 1, 1, 1);
+                    var table = DashTable(new[] { "Period", "API value", "Tokens" }, 1.3, 1.2, 1);
                     foreach (var pair in new[] { ("Today", spend.Today), ("7 days", spend.Week), ("30 days", spend.Month) })
                         if (pair.Item2 != null)
                         {
                             var t = pair.Item2;
-                            DashRow(table, pair.Item1, Format.Money(t.Cost), Format.Tokens(t.Input), Format.Tokens(t.Output), Format.Tokens(t.CacheRead), Format.Tokens(t.CacheWrite));
+                            DashRow(table, pair.Item1, Format.Money(t.Cost), Format.Tokens(t.Tokens));
                         }
                     detail.Children.Add(table);
+                    var tokens = DashTable(new[] { "Token type", "Today", "7 d", "30 d" }, 1.5, 1, 1, 1);
+                    Func<Func<Totals, double>, string[]> values = select => new[] { spend.Today, spend.Week, spend.Month }
+                        .Select(t => t == null ? "—" : Format.Tokens(select(t))).ToArray();
+                    foreach (var pair in new[] { ("Input", (Func<Totals, double>)(t => t.Input)), ("Output", (Func<Totals, double>)(t => t.Output)),
+                        ("Cache read", (Func<Totals, double>)(t => t.CacheRead)), ("Cache write", (Func<Totals, double>)(t => t.CacheWrite)) })
+                        DashRow(tokens, new[] { pair.Item1 }.Concat(values(pair.Item2)).ToArray());
+                    detail.Children.Add(tokens);
                     if (spend.CostPerHour != null)
                         detail.Children.Add(Text("Recent pace: " + Format.Money(spend.CostPerHour.Value) + "/h · " + Format.Tokens(spend.TokensPerMin ?? 0) + " tokens/min", 12, theme.TextSecondary));
-                    page.Children.Add(DashCard(provider.Name + " · token breakdown", detail));
-                    page.Children.Add(DashColumns(new List<FrameworkElement> {
+                    body.Children.Add(DashCard(provider.Name + " · token breakdown", detail));
+                    body.Children.Add(DashStack(new List<FrameworkElement> {
                         DashShares(provider.Name + " · top models, last 7 days", spend.Models, true),
                         DashShares(provider.Name + " · top projects, last 7 days", spend.Projects, false)
-                    }, width));
+                    }));
                 }
                 if (history.Any(p => p.Spend.Estimated))
-                    page.Children.Add(DashNote("Some models use an estimated family price. These figures can change when published prices change."));
+                    body.Children.Add(DashNote("Some models use an estimated family price. These figures can change when published prices change."));
                 var unpriced = history.Sum(p => p.Spend.Unpriced);
                 if (unpriced > 0)
-                    page.Children.Add(DashNote(unpriced.ToString("N0", CultureInfo.InvariantCulture) + " messages have no known model price and are excluded from the API-value estimate."));
+                    body.Children.Add(DashNote(unpriced.ToString("N0", CultureInfo.InvariantCulture) + " messages have no known model price and are excluded from the API-value estimate."));
             }
             if (data.Cost && data.LogFiles != null)
             {
@@ -132,10 +124,10 @@ namespace FleetPanel
                 if (data.SkippedArchives > 0) coverage += " · " + data.SkippedArchives + " compressed Codex archives not indexed; totals are incomplete";
                 var note = Text(coverage, 12, data.SkippedArchives > 0 ? theme.CautionText : theme.TextTertiary);
                 note.TextWrapping = TextWrapping.Wrap; note.Margin = new Thickness(0, 16, 0, 0);
-                page.Children.Add(note);
+                body.Children.Add(note);
             }
             Tick();
-            return page;
+            return body;
         }
 
         private FrameworkElement DashProvider(Provider p)
@@ -212,44 +204,37 @@ namespace FleetPanel
                 var empty = Text("No priced activity in this period.", 13, theme.TextSecondary);
                 empty.Margin = new Thickness(0, 28, 0, 28); body.Children.Add(empty);
             }
-            else body.Children.Add(new DashboardChart(theme, days) { Height = 130, Margin = new Thickness(0, 12, 0, 6) });
+            else body.Children.Add(new DashboardChart(theme, days) { Height = 90, Margin = new Thickness(0, 10, 0, 6) });
             var axis = new DockPanel();
             var end = Text(last, 11, theme.TextTertiary); DockPanel.SetDock(end, Dock.Right); axis.Children.Add(end);
             axis.Children.Add(Text(first, 11, theme.TextTertiary)); body.Children.Add(axis);
             return DashCard(title, body);
         }
 
-        private Grid DashColumns(IList<FrameworkElement> items, double width)
+        private StackPanel DashStack(IList<FrameworkElement> items)
         {
-            var grid = new Grid();
-            var columns = width >= 900 ? 2 : 1;
-            for (var c = 0; c < columns; c++) grid.ColumnDefinitions.Add(new ColumnDefinition());
-            for (var i = 0; i < items.Count; i++)
-            {
-                if (i % columns == 0) grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-                items[i].Margin = new Thickness(0, 0, columns == 2 && i % columns == 0 ? 16 : 0, 16);
-                Grid.SetRow(items[i], i / columns); Grid.SetColumn(items[i], i % columns); grid.Children.Add(items[i]);
-            }
-            return grid;
+            var stack = new StackPanel();
+            foreach (var item in items) stack.Children.Add(item);
+            return stack;
         }
 
         private Border DashCard(string title, FrameworkElement child, Provider provider = null)
         {
             var body = new StackPanel();
-            var heading = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+            var heading = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
             if (provider != null)
             {
-                var icon = Icon(provider.Icon, provider.Mark, 18); icon.Margin = new Thickness(0, 0, 8, 0); heading.Children.Add(icon);
+                var icon = Icon(provider.Icon, provider.Mark, 18); icon.Margin = new Thickness(0, 0, 8, 0); DockPanel.SetDock(icon, Dock.Left); heading.Children.Add(icon);
             }
-            heading.Children.Add(Text(title, 14, theme.Text, FontWeights.SemiBold));
+            var label = Text(title, 14, theme.Text, FontWeights.SemiBold); label.TextWrapping = TextWrapping.Wrap; heading.Children.Add(label);
             body.Children.Add(heading); body.Children.Add(child);
-            return new Border { Child = body, Padding = new Thickness(18), Margin = new Thickness(0, 0, 0, 16),
-                Background = Brush(theme.ControlFill), BorderBrush = Brush(theme.Divider), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6) };
+            return new Border { Child = body, Padding = new Thickness(0, 4, 0, 12), Margin = new Thickness(0, 0, 0, 12),
+                BorderBrush = Brush(theme.Divider), BorderThickness = new Thickness(0, 0, 0, 1) };
         }
 
         private FrameworkElement DashTitle(string title)
         {
-            var label = Text(title, 16, theme.Text, FontWeights.SemiBold); label.Margin = new Thickness(0, 8, 0, 12); return label;
+            var label = Text(title, 14, theme.Text, FontWeights.SemiBold); label.Margin = new Thickness(0, 8, 0, 10); return label;
         }
 
         private FrameworkElement DashNote(string text)
