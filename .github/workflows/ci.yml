@@ -42,3 +42,13 @@ jobs:
                   print(f"{path}:{finding['line_number']}: {finding['type']}")
           sys.exit(1 if results else 0)
           PY
+
+  native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build native flyout
+        env:
+          DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: "true"
+          DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+        run: dotnet build native/FleetPanel/FleetPanel.csproj -c Release -nologo -v q

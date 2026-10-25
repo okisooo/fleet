@@ -12,17 +12,23 @@ Two kinds of reading:
   * rate-limit header probes - only available by sending a real 1-token request,
     so they cost a fraction of a cent and stay opt-in per provider.
 
-Keys are read from environment variables only. Fleet never writes a key to disk,
-never logs one, and the config file holds variable *names*, not secrets.
+Keys come from environment variables or Windows Credential Manager. Fleet never
+puts keys in JSON or logs; config holds variable *names*, not secrets.
 """
 from __future__ import annotations
 
+import hashlib
+import email.utils
 import json
 import os
 import re
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+import api_credentials
 
 # ---------- config ----------
 CONFIG_NAME = "providers.json"
@@ -284,18 +290,13 @@ BUILTIN = [
     },
     {
         "id": "anthropic-admin",
-        "label": "Anthropic org",
+        "label": "Claude API",
         "env": ["ANTHROPIC_ADMIN_KEY"],
         "auth": "x-api-key",
         "url": "https://api.anthropic.com/v1/organizations/cost_report",
         "headers": {"anthropic-version": "2023-06-01"},
-        "query": {"bucket_width": "1d", "limit": "1"},
-        "since": "starting_at",
-        "since_format": "iso",
-        "metrics": [
-            {"label": "Cost 24h", "kind": "money",
-             "value": "data[0].results[0].amount", "currency_literal": "USD"},
-        ],
+        "collector": "anthropic_cost",
+        "metrics": [],
     },
     {
         # Self-hosted proxy: the base URL is the user's own deployment.
@@ -343,7 +344,7 @@ for _id, _label, _env, _base, _model in PROBES:
 
 BUILTIN.append({
     "id": "anthropic",
-    "label": "Anthropic API",
+    "label": "Claude API",
     "env": ["ANTHROPIC_API_KEY"],
     "auth": "x-api-key",
     "probe": {"base": "https://api.anthropic.com/v1", "style": "anthropic",
@@ -419,6 +420,35 @@ def _first_env(names, environ=None):
     return None, None
 
 
+def _key_for(spec, environ=None):
+    name, key = _first_env(spec.get("env"), environ)
+    if key:
+        return "environment", key
+    # Explicit test environments never consult the user's credential store.
+    if environ is None and spec.get("id") in api_credentials.TARGETS and not spec.get("custom"):
+        key = api_credentials.read(spec["id"])
+        if key:
+            return "windows", key
+    return None, None
+
+
+def account_status(config=None):
+    """Non-secret setup metadata for the native panel, including disabled keys."""
+    settings = (config or {}).get("providers") or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    out = []
+    for pid in ("anthropic", "anthropic-admin"):
+        user = settings.get(pid) or {}
+        if not isinstance(user, dict):
+            user = {}
+        spec = BUILTIN_BY_ID[pid]
+        names = [user["env"]] if user.get("env") else spec["env"]
+        out.append({"id": pid, "source": _key_for(dict(spec, env=names))[0] or "",
+                    "enabled": user.get("enabled") is not False})
+    return out
+
+
 def _auth_headers(spec, key):
     style = spec.get("auth") or "bearer"
     if style == "x-api-key":
@@ -481,16 +511,22 @@ def enabled_specs(config, environ=None):
         names = [user["env"]] if user.get("env") else spec.get("env") or []
         # A real process lookup may also see values written by `setx` after
         # Fleet started. Explicit mappings in tests/config checks stay isolated.
-        has_key = bool(_first_env(names, environ)[1])
+        has_key = bool(_key_for(dict(spec, env=names), environ)[1])
         wants_probe = bool(user.get("probe"))
         if user.get("enabled") is False or not has_key:
             continue
-        if spec.get("probe") and not wants_probe:
+        if spec.get("probe") and not wants_probe and spec["id"] != "anthropic":
             continue
         merged = dict(spec)
         merged["env"] = names
         merged["_settings"] = user
+        if spec["id"] == "anthropic" and not wants_probe:
+            merged["connection_only"] = True
         out.append(merged)
+    # Both credentials describe the same account. Prefer its billing report;
+    # keep an explicitly enabled rate-limit probe as a separate opt-in signal.
+    if any(spec["id"] == "anthropic-admin" for spec in out):
+        out = [spec for spec in out if not spec.get("connection_only")]
     for index, entry in enumerate(config.get("custom") or []):
         spec = normalize_custom(entry, index)
         if spec:
@@ -527,13 +563,123 @@ def _plan_text(spec, payload):
     return str(spec.get("plan_map", {}).get(str(value), value))[:16]
 
 
+def _anthropic_error(status):
+    if status in (401, 403):
+        return "key rejected"
+    if status == 404:
+        return "billing reports unavailable for this account"
+    if status == 429:
+        return "rate limited (http 429)"
+    return f"http {status}" if status else "offline"
+
+
+def _retry_at(headers):
+    value = next((v for k, v in (headers or {}).items() if k.casefold() == "retry-after"), None)
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+        if 0 <= seconds <= 86400:
+            return time.time() + seconds
+    except (TypeError, ValueError):
+        try:
+            return min(time.time() + 86400, email.utils.parsedate_to_datetime(str(value)).timestamp())
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
+
+
+def _anthropic_cost(spec, key, http, M, timeout):
+    """Organization spend in UTC days; amounts are decimal cents, not credits.
+
+    Publish only complete reports so pagination failures retain the last reading.
+    """
+    out = dict(agent=spec["label"], api_id=spec["id"], plan="Organization",
+               credential_id=hashlib.sha256(key.encode()).hexdigest(),
+               metrics=[], err="", compact=False)
+    now = datetime.fromtimestamp(time.time(), timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    query = {"starting_at": today.replace(day=1).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "bucket_width": "1d", "limit": "31"}
+    headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "Accept": "application/json"}
+    month_cents = today_cents = Decimal(0)
+    seen = set()
+    for _ in range(16):
+        url = spec["url"] + "?" + urllib.parse.urlencode(query)
+        status, response_headers, body = http("GET", url, headers, timeout=timeout)
+        if status != 200:
+            out["err"] = _anthropic_error(status)
+            if status == 429:
+                out["retry_at"] = _retry_at(response_headers)
+            return out
+        if len(body or b"") > 1_000_000:
+            out["err"] = "payload too large"
+            return out
+        try:
+            payload = json.loads(body)
+            buckets = payload["data"]
+            if not isinstance(buckets, list):
+                raise ValueError()
+            for bucket in buckets:
+                day = datetime.fromisoformat(bucket["starting_at"].replace("Z", "+00:00"))
+                results = bucket["results"]
+                if day.tzinfo is None or not isinstance(results, list):
+                    raise ValueError()
+                if not today.replace(day=1) <= day < today + timedelta(days=1):
+                    raise ValueError()
+                for result in results:
+                    if result.get("currency", "USD").upper() != "USD":
+                        raise ValueError()
+                    cents = Decimal(str(result["amount"]))
+                    if not cents.is_finite() or not 0 <= cents < Decimal("1e18"):
+                        raise ValueError()
+                    month_cents += cents
+                    if day >= today:
+                        today_cents += cents
+            more = payload.get("has_more", False)
+            if not isinstance(more, bool):
+                raise ValueError()
+            if not more:
+                break
+            page = payload["next_page"]
+            if not isinstance(page, str) or not page or page in seen:
+                raise ValueError()
+            seen.add(page)
+            query["page"] = page
+        except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation, OverflowError):
+            out["err"] = "bad billing report"
+            return out
+    else:
+        out["err"] = "billing report incomplete"
+        return out
+    out["metrics"] = [dict(M(label, extra=f"${cents / 100:,.2f}"), keep_zero=True)
+                      for label, cents in (("This month", month_cents), ("Today (UTC)", today_cents))]
+    out["account"] = {"mode": "spend", "billing_url": True}
+    return out
+
+
 def collect(spec, http, header_get, M, timeout=10):
     """Read one spec and return Fleet's provider dict."""
     settings = spec.get("_settings") or {}
     out = dict(agent=spec["label"], plan="", metrics=[], err="", api_id=spec["id"], compact=True)
-    env_name, key = _first_env(spec.get("env"))
+    _, key = _key_for(spec)
     if not key and spec.get("auth") != "none":
         out["err"] = "no key"
+        return out
+
+    if spec.get("collector") == "anthropic_cost":
+        return _anthropic_cost(spec, key, http, M, timeout)
+    if spec.get("connection_only"):
+        out["credential_id"] = hashlib.sha256(key.encode()).hexdigest()
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "Accept": "application/json"}
+        status, response_headers, _ = http("GET", "https://api.anthropic.com/v1/models?limit=1", headers, timeout=timeout)
+        out.update(plan="API key", account={"mode": "connection", "billing_url": True})
+        if status == 200:
+            out["metrics"] = [M("Credit balance", extra="View in Console")]
+        else:
+            out["err"] = _anthropic_error(status)
+            if status == 429:
+                out["retry_at"] = _retry_at(response_headers)
         return out
 
     probe = spec.get("probe")

@@ -8,9 +8,9 @@ Two data modes per agent:
   * logs - local token tallies scraped from session JSONL (fallback / --logs).
 
 Token handling:
-  * Reads credentials only from local CLI/app state.
-  * Claude refreshes through Claude Code first; Grok may atomically update its
-    own CLI credential file when its provider rotates a token.
+  * Reads credentials from local CLI/app state.
+  * Claude refreshes through Claude Code first. Grok credentials are strictly
+    read-only: only the Grok CLI may refresh or rewrite its own auth state.
   * Runtime cache stays in ./.cache during development and LocalAppData\\Fleet
     when packaged. Tokens never enter logs.
 
@@ -21,8 +21,8 @@ Run:  uv run --with rich python fleet.py            # live API view, 30s refresh
 Endpoints/field shapes cribbed from openusage (MIT, robinebers/openusage).
 """
 from __future__ import annotations
-import argparse, base64, concurrent.futures, email.utils, glob, json, os, re, shutil, sqlite3, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
-from datetime import datetime, timezone
+import argparse, base64, concurrent.futures, ctypes, email.utils, functools, glob, hashlib, json, logging, os, re, shutil, sqlite3, subprocess, sys, threading, time, urllib.request, urllib.error, urllib.parse
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -122,6 +122,27 @@ def cache_put(agent, access_token, exp, **extra):
         dbg("cache_put", agent, e)
 
 
+def _token_id(token):
+    """A short one-way fingerprint: enough to recognise a token, useless to replay."""
+    return hashlib.sha256(str(token).encode()).hexdigest()[:16]
+
+
+def _token_dead(agent, token):
+    """True while this exact token is known to be rejected. The owning CLI
+    writing a new token clears it, so a dead login is never re-sent every poll."""
+    try:
+        return (CACHE / f"{agent}_dead_token").read_text().strip() == _token_id(token)
+    except OSError:
+        return False
+
+
+def _mark_token_dead(agent, token):
+    try:
+        (CACHE / f"{agent}_dead_token").write_text(_token_id(token))
+    except OSError:
+        pass
+
+
 def _jwt_exp(tok):
     try:
         p = tok.split(".")[1]
@@ -137,6 +158,18 @@ def _pct_bar(pct, w=14):
     fill = int(round(pct / 100 * w))
     color = "green" if pct < 60 else ("yellow" if pct < 85 else "red")
     return f"[{color}]{'█'*fill}{'░'*(w-fill)}[/] {pct:4.0f}%"
+
+
+def _epoch(iso_or_ms):
+    """Epoch seconds from an ISO8601 string or epoch ms/sec, else None."""
+    if iso_or_ms in (None, "", 0):
+        return None
+    try:
+        if isinstance(iso_or_ms, (int, float)):
+            return float(iso_or_ms) / (1000 if iso_or_ms > 1e12 else 1)
+        return datetime.fromisoformat(str(iso_or_ms).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
 
 
 def _until(iso_or_ms):
@@ -171,8 +204,9 @@ def _save_last(agent, out):
     if not out.get("metrics"):
         return
     try:
+        metadata = {key: out[key] for key in ("credential_id", "account") if key in out}
         (CACHE / f"{agent}_last.json").write_text(json.dumps(
-            {"ts": time.time(), "plan": out.get("plan", ""), "metrics": out["metrics"]}))
+            {"ts": time.time(), "plan": out.get("plan", ""), "metrics": out["metrics"], **metadata}))
     except Exception:
         pass
 
@@ -192,114 +226,176 @@ def _load_last(agent, max_age=86400):
 # ================= PROVIDERS (API) =================
 # each returns dict: agent, plan, metrics[list of M], err
 
-_CLAUDE_UA = None
+# The panel offers a one-click sign-in for exactly these two states.
+CLAUDE_SIGNED_OUT = "Claude Code is signed out"
+CLAUDE_EXPIRED = "Claude Code sign-in expired"
 
 
-def _claude_user_agent():
-    global _CLAUDE_UA
-    if _CLAUDE_UA is None:
-        try:
-            p = subprocess.run(
-                ["claude", "--version"], capture_output=True, text=True, timeout=2,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            version = re.search(r"\d+(?:\.\d+)+", p.stdout)
-            _CLAUDE_UA = f"claude-code/{version.group()}" if version else "claude-code/2.1.0"
-        except Exception:
-            _CLAUDE_UA = "claude-code/2.1.0"
-    return _CLAUDE_UA
+def _claude_cli():
+    """Path to the Claude Code CLI, or None. The native installer's default
+    location is checked too: a tray started at logon may predate a PATH edit."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    native = HOME / ".local" / "bin" / "claude.exe"
+    return str(native) if native.exists() else None
 
 
-def _claude_metrics_from_headers(headers):
-    """Read the same unified 5h/7d headers Claude Usage Tracker uses."""
-    def number(name):
-        try:
-            return float(_header(headers, name))
-        except (TypeError, ValueError):
-            return None
+def claude_sign_in(on_exit=None):
+    """Open a console running `claude auth login`; the CLI owns the whole flow.
 
-    five = number("anthropic-ratelimit-unified-5h-utilization")
-    week = number("anthropic-ratelimit-unified-7d-utilization")
-    if five is None and week is None:
-        return []
-    metrics = []
-    if five is not None:
-        metrics.append(M("Session", five * 100, number("anthropic-ratelimit-unified-5h-reset")))
-    if week is not None:
-        metrics.append(M("Weekly", week * 100, number("anthropic-ratelimit-unified-7d-reset")))
-    return metrics
-
-
-def _claude_messages_metrics(token, headers):
-    """One-token fallback used only when the dedicated usage endpoint is unavailable."""
-    h = dict(headers)
-    h["Authorization"] = f"Bearer {token}"
-    h["anthropic-version"] = "2023-06-01"
-    st, hd, _ = _http(
-        "POST", "https://api.anthropic.com/v1/messages", h,
-        {"model": "claude-haiku-4-5-20251001", "max_tokens": 1,
-         "messages": [{"role": "user", "content": "hi"}]},
+    Fleet never sees the browser handoff or the tokens it produces. `on_exit`
+    runs once the console closes, so a finished sign-in can be picked up without
+    waiting for the next scheduled poll. False when Claude Code is not installed.
+    """
+    exe = _claude_cli()
+    if not exe:
+        return False
+    process = subprocess.Popen(
+        ["cmd.exe", "/c", "title", "Claude", "sign-in", "&", exe, "auth", "login", "&", "pause"],
+        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
     )
-    metrics = _claude_metrics_from_headers(hd)
-    return metrics if st in (200, 429) else []
+    if on_exit is not None:
+        def wait():
+            process.wait()
+            on_exit()
+
+        threading.Thread(target=wait, name="claude-sign-in", daemon=True).start()
+    return True
+
+
+FLEET_UA = "Fleet (+https://github.com/okisooo/fleet)"
+
+
+def _claude_desktop_history():
+    return APPDATA / "Claude" / "plan-usage-history.json"
+
+
+def _claude_desktop_metrics(path=None, max_age=5400):
+    """Read the Claude desktop app's own 5-hour and 7-day utilisation samples.
+
+    Claude Code's CLI credentials and the desktop app's session are separate
+    logins. Signing in through the app alone leaves claudeAiOauth empty, and
+    Fleet used to show a dead provider even though live percentages were sitting
+    on disk. Read-only, like every other local client file Fleet touches.
+
+    Since desktop 2.19675 (2026-10) the app samples every fifteen minutes only
+    while its own tray menu has been opened recently ("background poll paused:
+    tray not opened recently"); otherwise it writes one sample per launch. So
+    this is a bonus source, never the reason Claude shows up -- the Claude Code
+    sign-in is.
+    """
+    path = path or _claude_desktop_history()
+    try:
+        samples = json.loads(Path(path).read_text()).get("samples") or []
+    except Exception as e:
+        dbg("claude desktop history", type(e).__name__)
+        return None
+    for sample in reversed(samples):
+        usage = sample.get("u") if isinstance(sample, dict) else None
+        if not isinstance(usage, dict) or not usage:
+            continue
+        ts = (sample.get("t") or 0) / 1000.0
+        if max_age and time.time() - ts > max_age:
+            return None
+        mets = []
+        if usage.get("fh") is not None:
+            mets.append(M("Session", usage["fh"]))
+        if usage.get("sd") is not None:
+            mets.append(M("Weekly", usage["sd"]))
+        return (mets, ts) if mets else None
+    return None
+
+
+def _claude_from_desktop(out):
+    """Promote a desktop-app reading into `out`, or leave it untouched."""
+    desktop = _claude_desktop_metrics()
+    if not desktop:
+        return None
+    out["metrics"], out["cached_at"] = desktop
+    out["source"] = "desktop"
+    out["err"] = ""
+    out.pop("configured", None)
+    return out
 
 
 def api_claude(force=False):
-    out = dict(agent="Claude", plan="", metrics=[], err="")
+    out = dict(agent="Claude", plan="", metrics=[], err="", known=False)
     cred = HOME / ".claude" / ".credentials.json"
     try:
-        full = json.loads(cred.read_text())
+        full = _read_claude(cred)
+        out["known"] = True
         o = full.get("claudeAiOauth", {})
         out["plan"] = str(o.get("subscriptionType") or o.get("rateLimitTier") or "")
+    except FileNotFoundError:
+        out["configured"] = False
+        out["err"] = "no Claude Code credentials"
+        return out
     except Exception as e:
+        out["known"] = True
         out["err"] = f"no creds ({e.__class__.__name__})"
         return out
     rt = o.get("refreshToken")
     tok = o.get("accessToken")
-    exp = o.get("expiresAt", 0)
-    exp = exp / 1000 if exp and exp > 1e12 else exp
+    exp = _claude_expiry(o)
     if not tok:
-        out["err"] = "no accessToken"
-        return out
+        # The desktop app keeps its own session; prefer its samples over nothing.
+        # Its Code tab never fills this file, so using Claude only through the
+        # app still leaves Claude Code itself signed out.
+        return _claude_from_desktop(out) or dict(
+            out, configured=False, err=CLAUDE_SIGNED_OUT
+        )
     # Auth and usage have separate throttles: a busy usage endpoint must never
     # stop an expired token from being refreshed.
-    auth_cool = 0 if force else _refresh_cooldown_left("claude_refresh")
-    if rt and exp and exp < time.time() + 60 and auth_cool:
-        out["err"] = f"auth retry in {max(1, int(auth_cool/60))}m"
-        return _cached_or(out, "claude")
-    # Proactive refresh if expired, then persist atomically so Claude Code stays in sync.
-    if rt and exp and exp < time.time() + 60:
-        refreshed = _refresh_claude_writeback(rt, cred, full)
-        if refreshed:
-            o = json.loads(cred.read_text()).get("claudeAiOauth", {})
-            tok = o.get("accessToken", tok)
-            exp = o.get("expiresAt", 0)
-            exp = exp / 1000 if exp and exp > 1e12 else exp
-        elif _refresh_cooldown_left("claude_refresh"):
-            out["err"] = "auth temporarily busy"
-            return _cached_or(out, "claude")
+    if rt and exp and exp < time.time() + CLAUDE_REFRESH_MARGIN:
+        status, printed = _renew_claude_via_cli(cred, tok, force=force)
+        try:
+            o = _read_claude(cred).get("claudeAiOauth") or {}
+        except (OSError, ValueError, AttributeError):
+            o = {}
+        if not o.get("accessToken"):
+            return _claude_from_desktop(out) or dict(out, configured=False, err=CLAUDE_SIGNED_OUT)
+        tok, exp = o["accessToken"], _claude_expiry(o)
+        if printed:
+            # Claude Code just read usage itself; a second request adds nothing.
+            out["metrics"] = printed
+            _save_last("claude", out)
+            return out
+        if exp and exp < time.time():
+            wait = _refresh_cooldown_left("claude_refresh")
+            if status == "missing":
+                out["err"] = f"{CLAUDE_EXPIRED} · Claude Code is not installed"
+            elif status == "busy":
+                out["err"] = f"{CLAUDE_EXPIRED} · renewing again in {max(1, int(wait / 60))}m"
+            else:
+                out["err"] = f"{CLAUDE_EXPIRED} · Claude Code could not renew it"
+            return _claude_from_desktop(out) or _cached_or(out, "claude")
+    if _token_dead("claude", tok):
+        out["err"] = CLAUDE_EXPIRED
+        return _claude_from_desktop(out) or _cached_or(out, "claude")
     usage_cool = 0 if force else _refresh_cooldown_left("claude_usage")
     if usage_cool:
         out["err"] = f"usage retry in {max(1, int(usage_cool/60))}m"
         return _cached_or(out, "claude")
-    hdrs = {"anthropic-beta": "oauth-2025-04-20", "User-Agent": _claude_user_agent(),
+    hdrs = {"anthropic-beta": "oauth-2025-04-20", "User-Agent": FLEET_UA,
             "Content-Type": "application/json"}
     st, hd, j = _jget("https://api.anthropic.com/api/oauth/usage", tok, hdrs)
-    if st == 401 and rt and (force or not _refresh_cooldown_left("claude_refresh")):
-        if _refresh_claude_writeback(rt, cred, full):
-            tok = json.loads(cred.read_text()).get("claudeAiOauth", {}).get("accessToken", tok)
-            st, hd, j = _jget("https://api.anthropic.com/api/oauth/usage", tok, hdrs)
     if st == 401:
-        out["err"] = "token expired (login Claude Code)"
-        return _cached_or(out, "claude")
+        # Revoked or expired early: not re-sent until Claude Code writes a new one.
+        _mark_token_dead("claude", tok)
+        out["err"] = CLAUDE_EXPIRED
+        return _claude_from_desktop(out) or _cached_or(out, "claude")
     if st != 200 or not isinstance(j, dict):
-        # The dedicated endpoint is frequently throttled/disabled. A minimal
-        # Messages call exposes exact subscription utilization in response headers,
-        # including on 429. Cache it for five minutes so this never becomes polling spam.
-        _set_cooldown("claude_usage", _retry_after(hd))
-        out["metrics"] = _claude_messages_metrics(tok, hdrs)
+        # The usage endpoint throttles hard. Back off for as long as it asks
+        # (at least five minutes), and ask Claude Code itself instead: its own
+        # /usage reads the same numbers without a second Fleet request.
+        _set_cooldown("claude_usage", max(300, _retry_after(hd)))
+        if not _refresh_cooldown_left("claude_cli_usage"):
+            _set_cooldown("claude_cli_usage", 600)
+            run = _run_claude_usage(cred)
+            out["metrics"] = _parse_claude_usage(run[1]) if run and run[0] == 0 else []
         if not out["metrics"]:
-            out["err"] = f"http {st}"
+            out["err"] = "rate limited" if st == 429 else f"http {st}"
             return _cached_or(out, "claude")
         _save_last("claude", out)
         return out
@@ -336,13 +432,12 @@ def _cached_or(out, agent):
     return out
 
 
-def _refresh_cooldown_left(agent, secs=300):
-    """Seconds left in a backoff; accepts old start timestamps and new expiry timestamps."""
-    f = CACHE / f"{agent}_backoff"
+def _refresh_cooldown_left(agent):
+    """Seconds left in a backoff. The file holds its expiry; reading a past expiry
+    as an old-style start time used to add five minutes to every backoff."""
     try:
-        stamp = float(f.read_text())
-        return max(0, stamp - time.time()) if stamp > time.time() else max(0, secs - (time.time() - stamp))
-    except Exception:
+        return max(0, float((CACHE / f"{agent}_backoff").read_text()) - time.time())
+    except (OSError, ValueError):
         return 0
 
 
@@ -353,64 +448,164 @@ def _set_cooldown(agent, secs=300):
         pass
 
 
-def _refresh_claude_via_cli(cred_path):
-    """Let Claude Code rotate its own credentials; never inspect or expose its output."""
-    try:
-        subprocess.run(
-            ["claude", "-p", "/status", "--output-format", "json", "--no-session-persistence"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        o = json.loads(cred_path.read_text()).get("claudeAiOauth", {})
-        exp = o.get("expiresAt", 0)
-        exp = exp / 1000 if exp and exp > 1e12 else exp
-        return bool(o.get("accessToken") and exp > time.time() + 60)
-    except Exception as e:
-        dbg("claude cli refresh", e.__class__.__name__)
-        return False
+# Claude Code renews an access token in the last five minutes before it expires;
+# asking any earlier would only read usage with the old token.
+CLAUDE_REFRESH_MARGIN = 240
+CLAUDE_CLI_TIMEOUT = 90
+# Lands in tray.log: renewal outcomes were invisible when Claude went stale.
+_RUNTIME = logging.getLogger("fleet.runtime")
+_CLI_USAGE_LINE = re.compile(
+    r"^Current (session|week \(([^)]+)\)):\s*(\d+(?:\.\d+)?)% used(?:\s*\S\s*resets (.+?))?\s*$")
+# English month names whatever the Windows locale: Claude Code prints them so.
+_MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+_CLI_RESET = re.compile(r"^(?:([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)$", re.I)
 
 
-def _refresh_claude_writeback(rt, cred_path, full):
-    """Refresh, then persist new access+refresh+expiry back to .credentials.json (atomic),
-    preserving every other field — mirrors openusage save(), keeps Claude Code in sync."""
-    if _refresh_claude_via_cli(cred_path):
-        try:
-            (CACHE / "claude_refresh_backoff").unlink()
-        except OSError:
-            pass
-        return True
-    st, hd, bd = _http("POST", "https://platform.claude.com/v1/oauth/token",
-                       {"User-Agent": _claude_user_agent(), "Accept": "application/json"},
-                       {"grant_type": "refresh_token", "refresh_token": rt,
-                        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"})
-    dbg("claude refresh http", st)
-    if st == 429:
-        _set_cooldown("claude_refresh", _retry_after(hd))
-        return False
+def _claude_expiry(oauth):
+    exp = oauth.get("expiresAt") or 0
     try:
-        j = json.loads(bd)
-        at = j["access_token"]
-    except Exception:
-        return False
-    o = dict(full.get("claudeAiOauth", {}))
-    o["accessToken"] = at
-    if j.get("refresh_token"):
-        o["refreshToken"] = j["refresh_token"]
-    o["expiresAt"] = int((time.time() + j.get("expires_in", 1800)) * 1000)
-    full = dict(full)
-    full["claudeAiOauth"] = o
+        exp = float(exp)
+    except (TypeError, ValueError):
+        return 0
+    return exp / 1000 if exp > 1e12 else exp
+
+
+def _read_claude(cred_path):
+    return json.loads(cred_path.read_text(encoding="utf-8-sig"))
+
+
+def _renew_strikes(agent="claude"):
     try:
-        tmp = cred_path.with_suffix(".json.fleet-tmp")
-        tmp.write_text(json.dumps(full, indent=2))
-        os.replace(tmp, cred_path)  # atomic
-    except Exception as e:
-        dbg("claude writeback", e)
-        return False
+        return int((CACHE / f"{agent}_renew_strikes").read_text())
+    except (OSError, ValueError):
+        return 0
+
+
+def _renew_failed(why, agent="claude"):
+    """Wait 5 min after a failed renewal, doubling to 6 h: the CLI renews on its
+    own the next time it runs, so there is nothing to gain by insisting."""
+    strikes = _renew_strikes(agent) + 1
     try:
-        (CACHE / "claude_refresh_backoff").unlink()
+        (CACHE / f"{agent}_renew_strikes").write_text(str(strikes))
     except OSError:
         pass
-    return True
+    wait = min(6 * 3600, 300 * 2 ** (strikes - 1))
+    _set_cooldown(f"{agent}_refresh", wait)
+    _RUNTIME.warning("%s sign-in renewal failed (%s); next try in %d min (attempt %d)",
+                     agent, why, max(1, wait // 60), strikes)
+
+
+def _renewed(agent):
+    for name in (f"{agent}_refresh_backoff", f"{agent}_renew_strikes"):
+        try:
+            (CACHE / name).unlink()
+        except OSError:
+            pass
+
+
+def _run_claude_usage(cred_path):
+    """Run Claude Code's own `/usage`, hidden. Returns (exit code, output) or None.
+
+    `/usage` is a local command: no model call, no quota spent. Claude Code
+    fetches plan usage through its own client, which first renews an expiring
+    login and saves it under Claude Code's own locks. Hooks and MCP servers are
+    off and no transcript is written, so the run leaves nothing behind.
+    """
+    exe = _claude_cli()
+    if not exe:
+        return None
+    probe = CACHE / "claude-probe"
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen(
+            [exe, "-p", "/usage", "--no-session-persistence", "--strict-mcp-config",
+             "--settings", '{"disableAllHooks":true}'],
+            cwd=str(probe), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as e:
+        dbg("claude cli", e.__class__.__name__)
+        return None
+    try:
+        out, _ = proc.communicate(timeout=CLAUDE_CLI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # Never stop Claude Code while it holds its refresh lock: the server may
+        # already have rotated the login it is about to save.
+        lock = cred_path.parent / ".oauth_refresh.lock"
+        deadline = time.time() + 60
+        while lock.exists() and time.time() < deadline:
+            time.sleep(0.5)
+        proc.kill()
+        out, _ = proc.communicate()
+        return -1, (out or b"").decode("utf-8", "replace")
+    return proc.returncode, (out or b"").decode("utf-8", "replace")
+
+
+def _parse_claude_usage(text, now=None):
+    """Metrics from Claude Code's `/usage` text, e.g.
+    "Current week (all models): 75% used · resets Oct 16, 8am (Asia/Tokyo)"."""
+    now = datetime.now().astimezone() if now is None else now
+    metrics = []
+    for line in str(text or "").splitlines():
+        found = _CLI_USAGE_LINE.match(line.strip())
+        if not found:
+            continue
+        kind, scope, pct, when = found.groups()
+        label = "Session" if kind == "session" else (
+            "Weekly" if (scope or "").casefold() == "all models" else scope)
+        metrics.append(M(label, float(pct), _cli_reset(when, now)))
+    return metrics
+
+
+def _cli_reset(when, now):
+    """"Oct 16, 8am (Asia/Tokyo)" -> ISO time in the local zone (which is the zone
+    Claude Code names); None when the text is not a date it recognises."""
+    found = _CLI_RESET.match(re.sub(r"\s*\([^)]*\)\s*$", "", str(when or "")).strip())
+    if not found:
+        return None
+    month, day, hour, minute, half = found.groups()
+    hour = int(hour) % 12 + (12 if half.lower() == "pm" else 0)
+    try:
+        stamp = now.replace(hour=hour, minute=int(minute or 0), second=0, microsecond=0)
+        if month:
+            stamp = stamp.replace(month=_MONTHS.index(month.lower()) + 1, day=int(day))
+            if stamp < now - timedelta(days=1):
+                stamp = stamp.replace(year=now.year + 1)
+        elif stamp < now:
+            stamp += timedelta(days=1)
+    except ValueError:
+        return None
+    return stamp.isoformat()
+
+
+def _renew_claude_via_cli(cred_path, seen_token, force=False):
+    """Have Claude Code renew its own login. Fleet never calls the token endpoint.
+
+    Anthropic answers refresh requests that do not come from Claude Code itself
+    with 429 before reading the token: it refused Fleet's for six days straight.
+    Returns (status, metrics): status is "renewed", "valid", "busy", "missing" or
+    "failed"; metrics are what Claude Code's `/usage` printed, when it did.
+    """
+    if not force and _refresh_cooldown_left("claude_refresh"):
+        return "busy", []
+    run = _run_claude_usage(cred_path)
+    if run is None:
+        return "missing", []
+    code, text = run
+    metrics = _parse_claude_usage(text) if code == 0 else []
+    try:
+        oauth = _read_claude(cred_path).get("claudeAiOauth") or {}
+    except (OSError, ValueError, AttributeError):
+        oauth = {}
+    token = oauth.get("accessToken")
+    if token and token != seen_token:
+        _renewed("claude")
+        _RUNTIME.info("claude sign-in renewed by Claude Code")
+        return "renewed", metrics
+    if token and _claude_expiry(oauth) > time.time():
+        return "valid", metrics
+    _renew_failed(f"exit {code}" if code else "login unchanged")
+    return "failed", metrics
 
 
 def _window_label(window, fallback="Usage"):
@@ -452,7 +647,7 @@ def _codex_credit_metric(balance):
 
 
 def api_codex():
-    out = dict(agent="Codex", plan="", metrics=[], err="")
+    out = dict(agent="Codex", plan="", metrics=[], err="", known=False)
     tok = acct = None
     for p in [os.environ.get("CODEX_HOME"), HOME / ".codex", HOME / ".config" / "codex"]:
         if not p:
@@ -460,8 +655,12 @@ def api_codex():
         f = Path(p) / "auth.json"
         try:
             a = json.loads(f.read_text())
-        except Exception:
+        except FileNotFoundError:
             continue
+        except Exception:
+            out["known"] = True
+            continue
+        out["known"] = True
         t = a.get("tokens") or a
         tok = t.get("access_token")
         acct = t.get("account_id") or a.get("account_id")
@@ -472,17 +671,26 @@ def api_codex():
                 tok = r
         break
     if not tok:
-        out["err"] = "no codex token"
+        out["configured"] = False
+        out["err"] = "no Codex credentials"
         return out
+    if _token_dead("codex", tok):
+        out["err"] = "token expired (run codex once)"
+        return _cached_or(out, "codex")
     hdr = {"User-Agent": "OpenUsage"}
     if acct:
         hdr["ChatGPT-Account-Id"] = acct
     st, hd, j = _jget("https://chatgpt.com/backend-api/wham/usage", tok, hdr)
-    if st == 401 and rt:  # expired -> refresh in memory, retry once
+    # Opt-in only (--refresh). OpenAI rotates refresh tokens: refreshing here and
+    # keeping the result in memory retires the token Codex CLI has saved, which
+    # signs the CLI out. By default Fleet waits for Codex to refresh itself.
+    if st == 401 and rt and REFRESH:
         r = _refresh_codex(rt)
         if r:
             tok = r
             st, hd, j = _jget("https://chatgpt.com/backend-api/wham/usage", tok, hdr)
+    if st == 401:
+        _mark_token_dead("codex", tok)
     if st != 200 or not isinstance(j, dict):
         out["err"] = ("token expired (run codex once)" if st == 401 else f"http {st}")
         return _cached_or(out, "codex")
@@ -527,14 +735,145 @@ def _refresh_codex(rt):
         return None
 
 
+def _unwrap_number(value):
+    """Accept a scalar or {"val": n} billing amount; never throw on junk."""
+    if isinstance(value, dict):
+        value = value.get("val", value.get("value"))
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _quota_metrics(metrics):
+    """Percent windows are the only Grok facts the flyout treats as usage."""
+    return [m for m in (metrics or []) if m.get("pct") is not None]
+
+
+def _grok_metrics(cred, bill):
+    """Map cli-chat-proxy billing payloads onto Fleet's metric rows."""
+    cfg = (cred or {}).get("config", {}) if isinstance(cred, dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cp = cfg.get("currentPeriod") or {}
+    if not isinstance(cp, dict):
+        cp = {}
+    metrics = []
+    weekly = _unwrap_number(cfg.get("creditUsagePercent"))
+    if weekly is None and cp.get("type"):
+        # The proxy serialises protobuf JSON, which omits zero-valued fields: a
+        # live weekly period with no usage yet arrives without the percentage.
+        # Reading that as "no data" filed an unused Grok under inactive as "off".
+        weekly = 0.0
+    if weekly is not None:
+        wk = "WEEKLY" in str(cp.get("type", "")).upper()
+        metrics.append(M("Weekly" if wk else "Usage", weekly, cp.get("end")))
+    for pu in (cfg.get("productUsage") or []):
+        if not isinstance(pu, dict):
+            continue
+        pct = _unwrap_number(pu.get("usagePercent"))
+        if pct is None:
+            continue
+        if weekly is not None and abs(pct - weekly) <= 0.5:
+            continue
+        metrics.append(M(str(pu.get("product") or "product"), pct, cp.get("end")))
+    b = (bill or {}).get("config", {}) if isinstance(bill, dict) else {}
+    if not isinstance(b, dict):
+        b = {}
+    lim = _unwrap_number(b.get("monthlyLimit"))
+    used = _unwrap_number(b.get("used")) or 0
+    if lim:
+        metrics.append(M(
+            "Monthly",
+            used / lim * 100,
+            b.get("billingPeriodEnd"),
+            f"{used:g}/{lim:g} cr",
+        ))
+    cap = _unwrap_number(cfg.get("onDemandCap")) or _unwrap_number(b.get("onDemandCap")) or 0
+    metrics.append(M("Pay-go", None, None, f"{cap:g}" if cap else "off"))
+    return metrics
+
+
+# The Grok CLI's access token lives six hours and is renewed only while the CLI
+# runs; its refresh token rotates on every use and dies after about a week unused.
+GROK_CLI_TIMEOUT = 90
+# The CLI refreshes five minutes ahead while it runs: a running session renews
+# first, and Fleet only steps in once nobody has.
+GROK_RENEW_MARGIN = 60
+
+
+def _grok_cli():
+    """The CLI installed beside the login it owns (~/.grok/bin), or None."""
+    exe = HOME / ".grok" / "bin" / "grok.exe"
+    return str(exe) if exe.is_file() else None
+
+
+def _grok_entry():
+    """The Grok CLI's stored login (its auth.json entry with a key), or None."""
+    auth = json.loads((HOME / ".grok" / "auth.json").read_text())
+    if isinstance(auth, dict):
+        for value in auth.values():
+            if isinstance(value, dict) and value.get("key"):
+                return value
+    return None
+
+
+def _renew_grok_via_cli(seen_expiry):
+    """Have the Grok CLI renew its own login. Fleet never calls the token endpoint.
+
+    `grok models` lists models and exits: it authenticates first, so the CLI
+    refreshes silently through its identity provider and saves the new login
+    under its own lock. No browser, no model call. Without this a login lapsed six
+    hours after the CLI last ran, and after a week unused it needed the browser.
+    Returns "renewed", "busy", "missing" or "failed".
+    """
+    if _refresh_cooldown_left("grok_refresh"):
+        return "busy"
+    exe = _grok_cli()
+    if not exe:
+        return "missing"
+    try:
+        proc = subprocess.Popen(
+            [exe, "models"], cwd=str(HOME), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as e:
+        dbg("grok cli", e.__class__.__name__)
+        return "missing"
+    try:
+        code = proc.wait(timeout=GROK_CLI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # A refresh takes well under a second; give a hung one a little longer
+        # rather than stop it between the server rotating the login and saving it.
+        try:
+            code = proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = -1
+    try:
+        expiry = _epoch((_grok_entry() or {}).get("expires_at"))
+    except (OSError, ValueError):
+        expiry = None
+    if expiry and expiry > max(time.time() + GROK_RENEW_MARGIN, seen_expiry or 0):
+        _renewed("grok")
+        _RUNTIME.info("grok sign-in renewed by the Grok CLI")
+        return "renewed"
+    _renew_failed(f"exit {code}" if code else "login unchanged", agent="grok")
+    return "failed"
+
+
 def api_grok():
-    out = dict(agent="Grok", plan="", metrics=[], err="")
+    out = dict(agent="Grok", plan="", metrics=[], err="", known=False)
     # Soft-cache successful readings so tray polls do not re-hit cli-chat-proxy every cycle.
     # This reduces auth pressure on the same Grok account used by CLIProxyAPI/Codex.
+    # Pay-go "off" is not a usage reading: caching it hid Grok in the inactive list.
     last = _load_last("grok", max_age=180)
     if last:
-        mets, plan, _age, _ts = last
-        if mets:
+        mets, plan, _age_text, _ts = last
+        if _quota_metrics(mets):
             out["metrics"] = mets
             out["plan"] = plan
             out["err"] = "soft cache"
@@ -542,109 +881,102 @@ def api_grok():
             return out
     try:
         auth = json.loads((HOME / ".grok" / "auth.json").read_text())
+    except FileNotFoundError:
+        out["configured"] = False
+        # An installed Grok CLI with no auth file has been signed out (the CLI
+        # deletes it); say so instead of hiding Grok as if it never existed.
+        if (HOME / ".grok").is_dir():
+            out["known"] = True
+            out["err"] = "Grok is signed out (run grok)"
+        else:
+            out["err"] = "no Grok credentials"
+        return out
     except Exception as e:
+        out["known"] = True
         out["err"] = f"no creds ({e.__class__.__name__})"
         return out
-    ekey, entry = None, None
+    out["known"] = True
+    entry = None
     if isinstance(auth, dict):
-        for k, v in auth.items():
+        for v in auth.values():
             if isinstance(v, dict) and v.get("key"):
-                ekey, entry = k, v
+                entry = v
                 break
+    if entry:
+        expires = _epoch(entry.get("expires_at"))
+        tok = (entry.get("key") or "").strip()
+        if (expires and expires <= time.time() + GROK_RENEW_MARGIN) or _token_dead("grok", tok):
+            if _renew_grok_via_cli(expires) == "renewed":
+                try:
+                    entry = _grok_entry() or entry
+                except (OSError, ValueError):
+                    pass
     if not entry:
-        out["err"] = "no grok entry"
+        out["configured"] = False
+        out["err"] = "no Grok credentials"
         return out
     tok = (entry.get("key") or "").strip()
-    try:
-        exp = float(entry.get("expires_at") or 0)
-    except (TypeError, ValueError):
-        exp = 0
-    if exp > 1e12:
-        exp /= 1000
-    if exp and exp < time.time() + 60 and entry.get("refresh_token"):  # proactive
-        r = _refresh_grok_writeback(auth, ekey, entry)
-        if r:
-            tok = r
+    # Grok owns both the schema and refresh-token rotation for this file. A
+    # dashboard refresh must never race the CLI or serialize provider state in a
+    # shape the CLI cannot read. An expiring token is renewed above by running the
+    # CLI itself, which refreshes under its own lock; Fleet only reads the result.
+    # The file states its own expiry, so a dead token needs no doomed request --
+    # and saying how long it has been dead is the difference between a user
+    # noticing a stale login and staring at a provider that never updates.
+    expires = _epoch(entry.get("expires_at"))
+    if expires and expires <= time.time():
+        out["err"] = f"login expired {_age(expires)} ago (run grok)"
+        return _cached_or(out, "grok")
+    if _token_dead("grok", tok):
+        out["err"] = "login expired (run grok)"
+        return _cached_or(out, "grok")
     h = {"X-XAI-Token-Auth": "xai-grok-cli", "User-Agent": "OpenUsage"}
     st, hd, cred = _jget("https://cli-chat-proxy.grok.com/v1/billing?format=credits", tok, h)
-    if st == 401 and entry.get("refresh_token"):  # reactive: token died early, refresh + retry
-        r = _refresh_grok_writeback(auth, ekey, entry)
-        if r:
-            tok = r
-            st, hd, cred = _jget("https://cli-chat-proxy.grok.com/v1/billing?format=credits", tok, h)
     if st != 200:
-        out["err"] = ("token expired (run grok once)" if st == 401 else f"http {st}")
+        if st == 401:
+            _mark_token_dead("grok", tok)
+        out["err"] = ("login expired (run grok)" if st == 401 else f"http {st}")
         return _cached_or(out, "grok")
     _, _, settings = _jget("https://cli-chat-proxy.grok.com/v1/settings", tok, h)
     out["plan"] = (settings or {}).get("subscription_tier_display", "") if isinstance(settings, dict) else ""
-
-    def _v(x):  # unwrap {"val": n} or scalar
-        return x.get("val") if isinstance(x, dict) else x
-
-    cfg = (cred or {}).get("config", {}) if isinstance(cred, dict) else {}
-    cp = cfg.get("currentPeriod", {}) or {}
-    if cfg.get("creditUsagePercent") is not None:
-        wk = "WEEKLY" in str(cp.get("type", ""))
-        out["metrics"].append(M("Weekly" if wk else "Usage", cfg["creditUsagePercent"], cp.get("end")))
-    for pu in (cfg.get("productUsage") or []):
-        if pu.get("usagePercent") is not None and abs(pu["usagePercent"] - (cfg.get("creditUsagePercent") or -1)) > 0.5:
-            out["metrics"].append(M(pu.get("product", "product"), pu["usagePercent"], cp.get("end")))
-
-    # plain billing -> monthly credit pool used/limit
     _, _, bill = _jget("https://cli-chat-proxy.grok.com/v1/billing", tok, h)
-    b = (bill or {}).get("config", {}) if isinstance(bill, dict) else {}
-    lim, used = _v(b.get("monthlyLimit")), _v(b.get("used"))
-    if lim:
-        out["metrics"].append(M("Monthly", (used or 0) / lim * 100, b.get("billingPeriodEnd"),
-                                f"{used or 0}/{lim} cr"))
-    cap = _v(cfg.get("onDemandCap")) or _v(b.get("onDemandCap")) or 0
-    out["metrics"].append(M("Pay-go", None, None, str(cap) if cap else "off"))
-    _save_last("grok", out)
+    out["metrics"] = _grok_metrics(cred, bill)
+    if _quota_metrics(out["metrics"]):
+        _save_last("grok", out)
     return out
-
-
-def _refresh_grok_writeback(auth, ekey, entry):
-    """Refresh the xAI token and persist it back to ~/.grok/auth.json so the grok CLI
-    keeps working (same approach as the Claude path)."""
-    st, hd, bd = _http("POST", "https://auth.x.ai/oauth2/token", None,
-                       {"grant_type": "refresh_token", "client_id": entry.get("oidc_client_id", ""),
-                        "refresh_token": entry.get("refresh_token", "")}, form=True)
-    dbg("grok refresh http", st)
-    try:
-        j = json.loads(bd)
-        at = j["access_token"]
-    except Exception:
-        return None
-    e = dict(entry)
-    e["key"] = at
-    if j.get("refresh_token"):
-        e["refresh_token"] = j["refresh_token"]
-    if j.get("expires_in"):
-        e["expires_at"] = time.time() + j["expires_in"]
-    try:
-        full = dict(auth)
-        full[ekey] = e
-        p = HOME / ".grok" / "auth.json"
-        tmp = p.with_suffix(".json.fleet-tmp")
-        tmp.write_text(json.dumps(full, indent=2))
-        os.replace(tmp, p)  # atomic
-    except Exception as ex:
-        dbg("grok writeback", ex)
-    return at
 
 
 _AGY_BUCKETS = {"gemini-5h": "Session", "gemini-weekly": "Weekly", "3p-5h": "Claude", "3p-weekly": "Claude Wk"}
 
 
+def _agy_group_title(group):
+    """'Gemini Models' -> 'Gemini', 'Claude and GPT models' -> 'Claude & GPT'."""
+    title = re.sub(r"\s+models?$", "", str(group.get("displayName") or "").strip(), flags=re.I)
+    return title.replace(" and ", " & ") or "Quota"
+
+
 def _agy_parse_summary(j):
+    """One metric per quota bucket, keeping the group and window Antigravity names.
+
+    Groups come and go (a "Gemini 4 Argon" weekly bucket appeared in October), so
+    they are read from the response rather than a fixed list. A bucket's
+    remaining share is a protobuf oneof (fraction or amount): one without a
+    fraction is not reported in a form Fleet can show, and is skipped, as is a
+    disabled one.
+    """
     groups = ((j.get("response") or j).get("groups")) if isinstance(j, dict) else None
     mets = []
     for g in (groups or []):
+        title = _agy_group_title(g)
         for b in g.get("buckets", []):
             rf = b.get("remainingFraction")
-            if rf is not None:
-                mets.append(M(_AGY_BUCKETS.get(b.get("bucketId"), b.get("bucketId", "pool")),
-                              (1 - float(rf)) * 100, b.get("resetTime")))
+            if rf is None or b.get("disabled"):
+                continue
+            bucket = b.get("bucketId", "pool")
+            metric = M(_AGY_BUCKETS.get(bucket, bucket), (1 - float(rf)) * 100, b.get("resetTime"))
+            metric["group"] = title
+            metric["window"] = str(b.get("window") or "")
+            mets.append(metric)
     return mets
 
 
@@ -712,12 +1044,53 @@ def _agy_ls_call(ports, csrf, method):
     return 0, {}, None
 
 
+# Used when no Antigravity install can be read; the oldest version known to get
+# the Gemini quota group back.
+AGY_FALLBACK_VERSION = "2.11.0"
+
+
+def _exe_version(path):
+    """A Windows executable's file version ("2.25.0"), or None."""
+    try:
+        version = ctypes.windll.version
+        size = version.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(str(path), 0, size, buffer):
+            return None
+        info, length = ctypes.c_void_p(), ctypes.c_uint()
+        if not version.VerQueryValueW(buffer, "\\", ctypes.byref(info), ctypes.byref(length)) or not info.value:
+            return None
+        # VS_FIXEDFILEINFO: signature, struct version, then the file version MS/LS words.
+        fixed = ctypes.cast(info, ctypes.POINTER(ctypes.c_uint32 * 4)).contents
+        return f"{fixed[2] >> 16}.{fixed[2] & 0xFFFF}.{fixed[3] >> 16}"
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _agy_user_agent():
+    """Antigravity's own user agent with the installed version, then Fleet's name.
+
+    Google answers a bare "antigravity" as an old client: its quota summary then
+    leaves out the Gemini group, which is how Gemini went missing while
+    Antigravity was closed. The installed version gets the full summary back.
+    """
+    programs = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"
+    for exe in (programs / "antigravity" / "Antigravity.exe", programs / "Antigravity IDE" / "Antigravity IDE.exe"):
+        found = _exe_version(exe) if exe.is_file() else None
+        if found and found != "0.0.0":
+            return f"antigravity/{found} windows/amd64 {FLEET_UA}"
+    return f"antigravity/{AGY_FALLBACK_VERSION} windows/amd64 {FLEET_UA}"
+
+
 def _agy_cloud_call(token, method, payload):
     """Call a Code Assist method without exposing response data in diagnostics."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "User-Agent": "antigravity",
+        "User-Agent": _agy_user_agent(),
     }
     last = (0, {})
     for host in ("https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"):
@@ -824,10 +1197,11 @@ def _agy_refresh_access_token(refresh_token):
 
 def api_antigravity():
     """Live quota via local language server or refreshed local OAuth state."""
-    out = dict(agent="Antigrav", plan="gemini", metrics=[], err="")
+    out = dict(agent="Antigrav", plan="gemini", metrics=[], err="", known=False)
 
     ep = _agy_ls_endpoint()
     if ep:
+        out["known"] = True
         ports, csrf = ep
         st, j, where = _agy_ls_call(ports, csrf, "RetrieveUserQuotaSummary")
         mets = _agy_parse_summary(j)
@@ -844,6 +1218,7 @@ def api_antigravity():
 
     tok = _agy_token()
     if tok:
+        out["known"] = True
         for attempt in range(2):
             load_status, loaded = _agy_cloud_call(
                 tok, "loadCodeAssist", {"metadata": {"ideType": "ANTIGRAVITY"}}
@@ -870,12 +1245,20 @@ def api_antigravity():
 
     last = _load_last("antigravity")  # app closed -> show last live quota with age
     if last:
+        out["known"] = True
         mets, plan, age, cached_at = last
         out["metrics"] = mets
         out["plan"] = plan
         out["err"] = f"cached {age} ago (AGY closed)"
         out["cached_at"] = cached_at
         return out
+    out["known"] = (APPDATA / "Antigravity").exists() or any(
+        path.exists()
+        for path in (
+            HOME / ".gemini" / "antigravity-cli",
+            HOME / ".gemini" / "antigravity",
+        )
+    )
     out["plan"] = ""
     out["metrics"].append(M("closed", None, None, f"open AGY · bal {_agy_credit_balance()}"))
     out["err"] = "Antigravity not running"
@@ -1000,8 +1383,23 @@ def _collect_one_spec(spec):
     if out.get("metrics"):
         _save_last(agent, out)
         return out
+    if spec.get("collector") == "anthropic_cost" or spec.get("connection_only"):
+        if not out.get("credential_id") or out.get("err") in ("key rejected", "billing reports unavailable for this account"):
+            return out
+        # Old schema reports used cents as dollars. A replacement key can also
+        # belong to another organization: neither cache is a valid fallback.
+        try:
+            last = json.loads((CACHE / f"{agent}_last.json").read_text())
+            age = time.time() - last["ts"]
+            same_day = time.gmtime(last["ts"])[:3] == time.gmtime(time.time())[:3]
+            if last.get("credential_id") == out["credential_id"] and 0 <= age <= 86400 and same_day and last.get("account"):
+                return dict(out, plan=last.get("plan", ""), metrics=last["metrics"], account=last["account"],
+                            cached_at=last["ts"], err=f"cached {_age(last['ts'])} ago · {out.get('err', '')}")
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        return out
     cached = _cached_or(out, agent)
-    cached["compact"] = True
+    cached["compact"] = spec.get("collector") != "anthropic_cost"
     cached["api_id"] = spec["id"]
     return cached
 
@@ -1016,6 +1414,35 @@ def collect_api_keys(specs=None):
         return list(pool.map(_collect_one_spec, specs))
 
 
+# Seconds between live calls per provider. The tray polls every 30 s (10 s with
+# the panel open); within these windows a provider's last good reading is reused
+# with its real timestamp, so frequent panel refreshes never hammer an endpoint.
+# Refresh now (force) bypasses the pacing but not a provider's own backoff.
+# Anthropic throttles its usage endpoint at about one call a minute; three is safe.
+PACE = {"api_claude": 180, "api_codex": 30, "api_grok": 60, "api_antigravity": 15, "api_key": 60,
+        "api_key:anthropic-admin": 300, "api_key:anthropic": 300}
+_LIVE = {}
+_LIVE_LOCK = threading.Lock()
+
+
+def _paced(key, fetch, force=False):
+    now = time.monotonic()
+    with _LIVE_LOCK:
+        last = _LIVE.get(key)
+    pace = PACE.get(key, PACE["api_key"])
+    if last and not force:
+        previous = json.loads(last[1])
+        if now - last[0] < pace or (previous.get("retry_at") or 0) > time.time():
+            return previous
+    result = fetch()
+    if key in ("api_key:anthropic", "api_key:anthropic-admin") or (
+        result.get("metrics") and not result.get("err") and not result.get("cached_at")
+    ):
+        with _LIVE_LOCK:
+            _LIVE[key] = (now, json.dumps(result))
+    return result
+
+
 def collect_api(force_claude=False, include_api_keys=True):
     out = []
     specs = _api_key_specs()[0] if include_api_keys else []
@@ -1024,15 +1451,27 @@ def collect_api(force_claude=False, include_api_keys=True):
         # Started first: they are pure HTTP and finish while the local providers
         # are still reading credential files and shelling out to the CLIs.
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(specs)))
-        pending = [pool.submit(_collect_one_spec, spec) for spec in specs]
+        pending = [
+            pool.submit(_paced, "api_key:" + spec["id"], lambda spec=spec: _collect_one_spec(spec), force_claude)
+            for spec in specs
+        ]
+    def local(p):
+        try:
+            return _paced(
+                p.__name__,
+                (lambda: p(force=force_claude)) if p is api_claude else p,
+                force=force_claude,
+            )
+        except Exception as e:
+            dbg(p.__name__, repr(e))
+            return dict(agent=p.__name__.replace("api_", "").title()[:8], plan="",
+                        metrics=[], err=f"crash: {e.__class__.__name__}")
+
     try:
-        for p in API_PROVIDERS:
-            try:
-                out.append(p(force=force_claude) if p is api_claude else p())
-            except Exception as e:
-                dbg(p.__name__, repr(e))
-                out.append(dict(agent=p.__name__.replace("api_", "").title()[:8], plan="",
-                                metrics=[], err=f"crash: {e.__class__.__name__}"))
+        # Each local provider is its own credential file and endpoint, so they run
+        # side by side; a poll costs the slowest provider, not the sum of them.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(API_PROVIDERS)) as local_pool:
+            out.extend(local_pool.map(local, API_PROVIDERS))
         for future in pending or []:
             try:
                 out.append(future.result(timeout=30))

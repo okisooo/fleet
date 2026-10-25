@@ -36,8 +36,8 @@ Rules for a new built-in:
 - Only documented endpoints, or clearly marked experimental ones. No scraping a
   logged-in console session, and no cookies.
 - If reading usage costs money, it belongs behind `probe`, off by default.
-- Keys come from the environment. Never read one from a config file or write one
-  anywhere.
+- Keys come from environment variables or the current user's Windows Credential
+  Manager. Never read secrets from config or write them into JSON, logs or caches.
 
 ## pull requests
 
@@ -53,17 +53,25 @@ Rules for a new built-in:
 ## building a release locally
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.2.0
+.\scripts\build-release.ps1 -Version 0.3.0
 ```
 
-That creates `.build-venv`, generates the app icon and version resource, builds
-`dist\Fleet.exe`, and writes a portable ZIP. Building the installer additionally
-needs Inno Setup 6:
+This requires a .NET SDK as well as Python. It creates an isolated build
+environment under the scratch directory, builds `dist\Fleet\Fleet.exe` and
+`FleetPanel.exe`, and writes `dist\Fleet-0.3.0-portable.zip`. The whole `Fleet`
+directory is required. Use `-ScratchRoot` and `-OutputRoot` to choose physical
+storage; `-BuildVenv` can select an existing build environment.
+
+Building the installer additionally needs Inno Setup 6:
 
 ```powershell
-$env:FLEET_VERSION = "0.2.0"
+$env:FLEET_VERSION = "0.3.0"
+$env:FLEET_APP_ICON = "<scratch directory>\assets\fleet.ico"
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Fleet.iss
 ```
 
-Releases are published by the **release build** workflow when a `v*` tag is
-pushed. Maintainers should not upload hand-built binaries.
+The **release build** workflow runs when a `v*` tag is pushed. It creates a draft
+with the installer, portable ZIP and `SHA256SUMS.txt`. Verify the workflow,
+contents, version and digests before publishing the draft; do not substitute
+hand-built binaries. Keep the README, provider guide, changelog, screenshots,
+repository description and topics consistent with the shipped behavior.

@@ -1,6 +1,9 @@
 """Native WPF flyout renderer for Fleet.
 
-The warm host keeps one WPF window ready between clicks.\nWin11 system acrylic (DWMWA_SYSTEMBACKDROP_TYPE) is preferred; motion is a\ncontent TranslateTransform + opacity fade, never a Window.Top move.
+The warm host keeps one WPF window ready between clicks. Win11 system acrylic
+(DWMWA_SYSTEMBACKDROP_TYPE) is the material: a thin tint lets the real blur of
+the desktop through, and each provider floats on its own lit glass platter.
+Motion is a content TranslateTransform + opacity fade, never a Window.Top move.
 """
 from __future__ import annotations
 
@@ -19,44 +22,62 @@ WPF = (
     Path(os.environ.get("SystemRoot", r"C:\Windows"))
     / r"Microsoft.NET\Framework64\v4.0.30319\WPF"
 )
+WM_NCACTIVATE = 0x0086
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWA_SYSTEMBACKDROP_TYPE = 38
 DWMWCP_ROUND = 2
 # Transient-window acrylic is the official Win11 flyout material (menus, popups).
 DWMSBT_TRANSIENTWINDOW = 3
+WCA_ACCENT_POLICY = 19
+ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 MONITOR_DEFAULTTONEAREST = 2
 # Content-space motion only. Animating Window.Top forces a full DWM window move
 # every frame and is what made the old slide feel capped around 30 fps.
-SLIDE_DISTANCE = 12.0
-OPEN_MS = 180
-CLOSE_MS = 140
+SLIDE_DISTANCE = 10.0
+OPEN_MS = 160
+CLOSE_MS = 110
 PANEL_EDGE_GAP = 12.0
 PANEL_ANCHOR_GAP = 10.0
 # Must match what DWM actually rounds the window to. DWMWCP_ROUND is the Windows 11
 # standard 8 px for a flyout of this size. Drawing the rim at a different radius put
 # three curves on screen at once, which is what made the corners look mislayered.
 PANEL_CORNER_RADIUS = 10.0
+# Glass platters inset by WINDOW_PADDING. A slightly tighter curve than the
+# window keeps them nested instead of reading as a bubble inside a bubble.
+SURFACE_CORNER_RADIUS = 8.0
+# Capsules (status, plan tags, buttons) are fully round at their own height.
+CAPSULE_RADIUS = 10.0
 PANEL_WIDTH = 320.0
-# Real chrome: GlassClip padding, then a quiet card surface with room for data.
+# Real chrome: GlassClip padding, then one lit platter per provider.
 WINDOW_PADDING = 10.0
-CARD_PADDING = 10.0
+CARD_PADDING = 12.0
 CARD_BORDER = 1.0
 PANEL_PADDING = WINDOW_PADDING
 PANEL_BORDER = 1.0
-ROW_HEIGHT = 27.0
-AMOUNT_ROW_HEIGHT = 22.0
-PROVIDER_HEADER_HEIGHT = 20.0
+PLATTER_GAP = 8.0
+# One quota is one line: name, meter, value, reset. The old stacked form spent a
+# 30 px row plus a full-width slab on every window and pushed a four-provider
+# reading past the height of the flyout.
+ROW_HEIGHT = 22.0
+AMOUNT_ROW_HEIGHT = 20.0
+PROVIDER_HEADER_HEIGHT = 22.0
 BAR_HEIGHT = 6.0
-VALUE_COLUMN = 64.0
 CONTENT_WIDTH = (
     PANEL_WIDTH
+    - 2 * PANEL_BORDER
     - 2 * WINDOW_PADDING
     - 2 * CARD_BORDER
     - 2 * CARD_PADDING
 )
-BAR_TRACK = CONTENT_WIDTH
-NAME_MAX_WIDTH = CONTENT_WIDTH - 28.0
+LABEL_COLUMN = 52.0
+METER_COLUMN = 146.0
+VALUE_COLUMN = 40.0
+RESET_COLUMN = CONTENT_WIDTH - LABEL_COLUMN - METER_COLUMN - VALUE_COLUMN
+METER_INSET_LEFT = 4.0
+METER_INSET_RIGHT = 10.0
+BAR_TRACK = METER_COLUMN - METER_INSET_LEFT - METER_INSET_RIGHT
+NAME_MAX_WIDTH = CONTENT_WIDTH - 30.0
 
 
 def _bar_fill(pct):
@@ -65,17 +86,82 @@ def _bar_fill(pct):
         return 0.0
     return max(3.0, BAR_TRACK * pct / 100.0)
 PROVIDER_MARKS = {"Claude": "C", "Codex": "X", "Grok": "G", "Antigrav": "A"}
-PROVIDER_ACCENTS = {"Claude": "#FFF59E0B", "Codex": "#FF22D3EE", "Grok": "#FFD946EF", "Antigrav": "#FF22C55E"}
-# Fallback palette for API-key and custom providers, which Fleet cannot know ahead of time.
-API_ACCENTS = [
-    "#FF60A5FA", "#FF34D399", "#FFFBBF24", "#FFA78BFA",
-    "#FFF472B6", "#FF38BDF8", "#FFFB923C", "#FF94A3B8",
-]
-GRAD = {"g": "#FF22C55E", "y": "#FFF59E0B", "r": "#FFEF4444", "n": "#FF64748B"}
+# Monograms sit on the same white tile in both themes.
+ICON_INK = "#FF3F3F48"
+GRAD = {"g": "#FF6CCB7B", "y": "#FFFFC145", "r": "#FFFF6B6B", "n": "#FF8A8A99"}
 # Quotas use one calm base colour; amber and coral are reserved for pressure.
 # Freshness remains green/amber/red through GRAD, so state and consumption never
 # compete for the same visual meaning.
-METER = {"g": "#FF4F7CFF", "y": "#FFD89A2B", "r": "#FFE05252", "n": "#FF64748B"}
+METER_PRESSURE = {"y": "#FFFFB224", "r": "#FFFF5C5C", "n": "#FF8A8A99"}
+# Used when the shell has no accent to offer, or when the accent is itself warm
+# enough to be mistaken for the pressure colours below.
+METER_FALLBACK = {"dark": "#FF60CDFF", "light": "#FF0067C0"}
+_ACCENT = {}
+
+
+def _is_warm(rgb):
+    """True for an accent that would be mistaken for the pressure colours.
+
+    An amber or red accent on a low quota reads as a warning, so those users
+    keep the neutral base and only real pressure gets a warm meter.
+    """
+    import colorsys
+
+    hue, saturation, _ = colorsys.rgb_to_hsv(*[channel / 255 for channel in rgb])
+    return saturation > 0.25 and (hue * 360 < 45 or hue * 360 > 330)
+
+
+def _accent_pair():
+    """The user's Windows accent as (dark_surface_hex, light_surface_hex).
+
+    Windows stores a ramp of accent shades. The light end of the ramp is what
+    the shell puts on dark surfaces and the dark end is what it puts on light
+    ones, so reading both is what makes Fleet's meters look like the rest of
+    the system instead of a colour someone picked.
+    """
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM"
+        ) as key:
+            abgr = int(winreg.QueryValueEx(key, "AccentColor")[0])
+    except Exception:
+        return None
+    base = (abgr & 0xFF, (abgr >> 8) & 0xFF, (abgr >> 16) & 0xFF)
+    if _is_warm(base):
+        return None
+    dark_surface = "#FF%02X%02X%02X" % base
+    light_surface = dark_surface
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent",
+        ) as key:
+            palette = winreg.QueryValueEx(key, "AccentPalette")[0]
+        if len(palette) >= 20:
+            light_surface = "#FF%02X%02X%02X" % tuple(palette[16:19])
+    except Exception:
+        pass
+    return dark_surface, light_surface
+
+
+def _accent(light):
+    if "pair" not in _ACCENT:
+        try:
+            _ACCENT["pair"] = _accent_pair()
+        except Exception:
+            _ACCENT["pair"] = None
+    pair = _ACCENT["pair"]
+    if not pair:
+        return METER_FALLBACK["light" if light else "dark"]
+    return pair[1] if light else pair[0]
+
+
+def _meter(light):
+    """Consumption ramp: the system accent until a quota is actually under pressure."""
+    ramp = dict(METER_PRESSURE, g=_accent(light))
+    return {f"meter_{key}": value for key, value in ramp.items()}
 ASSETS_DIR = Path(__file__).resolve().parent / "assets" / "providers"
 
 
@@ -178,6 +264,14 @@ def _anchored_panel_origin(
     return left, top
 
 
+def _defer_to_dispatcher(dispatcher, callback):
+    """Queue `callback` on its own dispatcher frame, which is never input-sync."""
+    from System import Action
+    from System.Windows.Threading import DispatcherPriority
+
+    dispatcher.BeginInvoke(DispatcherPriority.Input, Action(callback))
+
+
 def _present_prepared_window(window, anchor_rect, position, prepare_open, begin_slide):
     """Show the warm flyout at its final rect, then play content-space motion."""
     position(anchor_rect)
@@ -185,7 +279,24 @@ def _present_prepared_window(window, anchor_rect, position, prepare_open, begin_
     prepare_open()
     window.Show()
     begin_slide()
-    window.Activate()
+
+    def take_foreground():
+        try:
+            window.Activate()
+        except Exception:
+            # Losing the foreground race is cosmetic -- the flyout is already on
+            # screen and the mouse watcher still light-dismisses it.
+            pass
+
+    # Taking the foreground reaches COM. Run from inside an input-synchronous
+    # dispatch -- which is exactly what an activation handoff from the tray click
+    # is -- that call raises RPC_E_CANTCALLOUT_ININPUTSYNCCALL (0x8001010d), a
+    # native fault that killed the whole panel host with no Python traceback.
+    dispatcher = getattr(window, "Dispatcher", None)
+    if dispatcher is None:
+        take_foreground()
+        return
+    _defer_to_dispatcher(dispatcher, take_foreground)
 
 
 class _MonitorInfo(ctypes.Structure):
@@ -230,106 +341,229 @@ class _MARGINS(ctypes.Structure):
     ]
 
 
+def _light_backdrop(hwnd, send=None):
+    """Draw the acrylic in its active state whether or not the flyout has focus.
+
+    DWM paints an inactive window's system backdrop as a flat fill: no blur and
+    no colour from behind. The flyout lives in the panel host, which never sees
+    the tray click, so its Activate() can lose the foreground race -- and every
+    such open showed a grey card instead of glass. WM_NCACTIVATE(TRUE) changes
+    only the frame's active look; focus is left alone.
+    """
+    if not hwnd:
+        return
+    send = send or ctypes.windll.user32.SendMessageW
+    send(ctypes.wintypes.HWND(hwnd), WM_NCACTIVATE, 1, 0)
+
+
 def _force_opaque():
     """Local escape hatch: FLEET_OPAQUE=1 keeps the solid panel."""
     return os.environ.get("FLEET_OPAQUE", "").strip().lower() in {"1", "true", "yes"}
 
 
-def _apply_window_chrome(hwnd, light):
-    """Round corners, match theme, and request official Win11 flyout acrylic.
+class _AccentPolicy(ctypes.Structure):
+    _fields_ = [
+        ("AccentState", ctypes.c_int),
+        ("AccentFlags", ctypes.c_int),
+        ("GradientColor", ctypes.c_uint),
+        ("AnimationId", ctypes.c_int),
+    ]
 
-    System backdrops refuse layered windows, so the panel keeps
-    AllowsTransparency=False and clears the client through HwndSource instead of
-    the old ACCENT_ENABLE_ACRYLICBLURBEHIND path (broken on 26xxx+).
+
+class _CompositionData(ctypes.Structure):
+    _fields_ = [
+        ("Attribute", ctypes.c_int),
+        ("Data", ctypes.c_void_p),
+        ("SizeOfData", ctypes.c_size_t),
+    ]
+
+
+def _material():
+    """Which backdrop draws the glass: "accent" (default), "system" or "opaque".
+
+    FLEET_MATERIAL picks one explicitly; FLEET_OPAQUE=1 still means opaque.
+    """
+    if _force_opaque():
+        return "opaque"
+    choice = os.environ.get("FLEET_MATERIAL", "").strip().lower()
+    return choice if choice in {"accent", "system", "opaque"} else "accent"
+
+
+def _accent_tint(light):
+    """ACCENT_POLICY colour, 0xAABBGGRR: a thin neutral veil under Fleet's own tint."""
+    return 0x59F3F3F3 if light else 0x8C202020
+
+
+def _apply_accent_acrylic(hwnd, light):
+    policy = _AccentPolicy(ACCENT_ENABLE_ACRYLICBLURBEHIND, 2, _accent_tint(light), 0)
+    data = _CompositionData(
+        WCA_ACCENT_POLICY, ctypes.cast(ctypes.byref(policy), ctypes.c_void_p),
+        ctypes.sizeof(policy),
+    )
+    try:
+        return bool(ctypes.windll.user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data)))
+    except AttributeError:
+        return False
+
+
+def _apply_window_chrome(hwnd, light):
+    """Round corners, match theme, and put live acrylic behind the client.
+
+    The default is the accent acrylic (SetWindowCompositionAttribute). On build
+    29648 the official DWMSBT_TRANSIENTWINDOW backdrop drew its flat inactive fill
+    even for a focused flyout, so the owner saw no glass at all, while accent
+    acrylic kept blurring. It used to composite black under WPF only because the
+    client was never extended into the frame; with the frame extended and the
+    HwndSource cleared, it renders correctly. FLEET_MATERIAL=system returns to
+    the official backdrop. Either way the window stays non-layered.
     """
     _set_dwm_int(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 0 if light else 1)
     _set_dwm_int(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
-    if _force_opaque():
-        return False
-    hr = _set_dwm_int(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
-    if hr != 0:
+    material = _material()
+    if material == "opaque":
         return False
     margins = _MARGINS(-1, -1, -1, -1)
-    extend = ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
-    return extend == 0
+    if ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins)) != 0:
+        return False
+    if material == "accent" and _apply_accent_acrylic(hwnd, light):
+        return True
+    return _set_dwm_int(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW) == 0
+
+
+def _mix(fore, back, amount):
+    """Solid blend of two #AARRGGBB colours, for fallbacks that must stay opaque."""
+    a = [int(fore[i:i + 2], 16) for i in (3, 5, 7)]
+    b = [int(back[i:i + 2], 16) for i in (3, 5, 7)]
+    return "#FF" + "".join(
+        "%02X" % round(x * amount + y * (1 - amount)) for x, y in zip(a, b)
+    )
 
 
 def _theme(light, acrylic=True):
-    """macOS Liquid Glass theme tokens.
+    """Layered-glass tokens.
 
-    Foreground colours stay fully opaque so text contrast never rides the desktop.
-    Surface, glass card pods, and specular rims use subtle transparency and
-    gradients.
+    The window tint stays thin so the system acrylic -- a real blur of whatever
+    is behind the flyout -- carries the material, the way a macOS popover lets
+    its vibrancy show. Each provider floats on a brighter platter whose top rim
+    catches the light and whose bottom rim falls away. Foregrounds stay opaque
+    so contrast never rides whatever is behind the glass.
     """
+    meter = _meter(light)
+    accent = meter["meter_g"]
     if light:
+        base = {
+            "fg": "#FF16161A",
+            "muted": "#FF4D4D56",
+            "faint": "#FF6C6C77",
+            **meter,
+        }
         if acrylic:
-            return {
-                "surface": "#D9F8FAFC",
-                "border_top": "#E0FFFFFF",
-                "border_bot": "#40D8DEE9",
-                "card_top": "#D6FFFFFF",
-                "card_bg": "#A8FFFFFF",
-                "card_border": "#78FFFFFF",
-                "icon_bg": "#15000000",
-                "fg": "#FF0F172A",
-                "muted": "#FF475569",
-                "faint": "#FF64748B",
-                "track": "#240F172A",
-                "pill_bg": "#FFF1F5F9",
-                "chip": "#FFF7F9FC",
-            }
-        return {
-            "surface": "#FFF7F9FC",
-            "border_top": "#FFD8DEE9",
-            "border_bot": "#FFD8DEE9",
-            "card_top": "#FFFFFFFF",
+            return dict(base, **{
+                # A sheen: the top of the window is lit, the rest lets glass through.
+                "surface_hi": "#9EFFFFFF",
+                "surface": "#80F2F2F5",
+                "border_top": "#F2FFFFFF",
+                "border_bot": "#40FFFFFF",
+                "card_bg": "#9EFFFFFF",
+                "card_hi": "#BDFFFFFF",
+                "rim_top": "#FFFFFFFF",
+                "rim_bot": "#1C000000",
+                "card_border": "#14000000",
+                "icon_bg": "#FFFFFFFF",
+                "icon_rim": "#14000000",
+                "track": "#17000000",
+                "pill_bg": "#0F000000",
+                "chip": "#FFFFFFFF",
+                "control_bg": "#B8FFFFFF",
+                "control_border": "#24000000",
+                "control_hover": "#F0FFFFFF",
+                "accent_soft": "#1F" + accent[3:],
+                "accent_soft_hover": "#33" + accent[3:],
+            })
+        return dict(base, **{
+            "surface_hi": "#FFF7F7FA",
+            "surface": "#FFF2F2F5",
+            "border_top": "#FFDDDDE3",
+            "border_bot": "#FFDDDDE3",
             "card_bg": "#FFFFFFFF",
-            "card_border": "#FFE2E8F0",
-            "icon_bg": "#FFE2E8F0",
-            "fg": "#FF0F172A",
-            "muted": "#FF475569",
-            "faint": "#FF64748B",
-            "track": "#FFE2E8F0",
-            "pill_bg": "#FFF1F5F9",
-            "chip": "#FFF7F9FC",
-        }
-    if acrylic:
-        return {
-            "surface": "#CC12161F",
-            "border_top": "#50FFFFFF",
-            "border_bot": "#15FFFFFF",
-            "card_top": "#24FFFFFF",
-            "card_bg": "#14FFFFFF",
-            "card_border": "#20FFFFFF",
-            "icon_bg": "#20FFFFFF",
-            "fg": "#FFF0F4F8",
-            "muted": "#FF94A3B8",
-            "faint": "#FF64748B",
-            "track": "#25FFFFFF",
-            "pill_bg": "#FF1E2530",
-            "chip": "#FF1A1E25",
-        }
-    return {
-        "surface": "#FF181C24",
-        "border_top": "#FF313842",
-        "border_bot": "#FF313842",
-        "card_top": "#FF282E39",
-        "card_bg": "#FF222732",
-        "card_border": "#FF2D3442",
-        "icon_bg": "#FF2D3442",
-        "fg": "#FFF0F4F8",
-        "muted": "#FF94A3B8",
-        "faint": "#FF64748B",
-        "track": "#FF2D3442",
-        "pill_bg": "#FF2D3442",
-        "chip": "#FF1A1E25",
+            "card_hi": "#FFFFFFFF",
+            "rim_top": "#FFE6E6EB",
+            "rim_bot": "#FFD5D5DC",
+            "card_border": "#FFE6E6EC",
+            "icon_bg": "#FFFFFFFF",
+            "icon_rim": "#FFE3E3E8",
+            "track": "#FFE4E4EA",
+            "pill_bg": "#FFEDEDF2",
+            "chip": "#FFFFFFFF",
+            "control_bg": "#FFFFFFFF",
+            "control_border": "#FFDDDDE3",
+            "control_hover": "#FFF5F5F8",
+            "accent_soft": _mix(accent, "#FFFFFFFF", 0.12),
+            "accent_soft_hover": _mix(accent, "#FFFFFFFF", 0.2),
+        })
+    base = {
+        "fg": "#FFFFFFFF",
+        "muted": "#FFD3D3DB",
+        "faint": "#FFA2A2AE",
+        **meter,
     }
+    if acrylic:
+        return dict(base, **{
+            "surface_hi": "#66303036",
+            "surface": "#801A1A1E",
+            # Glass lights its top edge and lets the bottom fall away; one flat
+            # rim is what made the old panel read as a rectangle pasted on the
+            # desktop.
+            "border_top": "#4DFFFFFF",
+            "border_bot": "#0FFFFFFF",
+            "card_bg": "#12FFFFFF",
+            "card_hi": "#21FFFFFF",
+            "rim_top": "#3DFFFFFF",
+            "rim_bot": "#0AFFFFFF",
+            "card_border": "#1AFFFFFF",
+            # Provider artwork ships on white, so the tile stays white in dark
+            # mode too -- an app icon, not a white square floating in a grey one.
+            "icon_bg": "#FFFFFFFF",
+            "icon_rim": "#33FFFFFF",
+            "track": "#2EFFFFFF",
+            "pill_bg": "#1AFFFFFF",
+            "chip": "#FF232329",
+            "control_bg": "#1FFFFFFF",
+            "control_border": "#33FFFFFF",
+            "control_hover": "#33FFFFFF",
+            "accent_soft": "#26" + accent[3:],
+            "accent_soft_hover": "#40" + accent[3:],
+        })
+    return dict(base, **{
+        "surface_hi": "#FF26262B",
+        "surface": "#FF202024",
+        "border_top": "#FF3A3A42",
+        "border_bot": "#FF2C2C33",
+        "card_bg": "#FF2A2A30",
+        "card_hi": "#FF2E2E35",
+        "rim_top": "#FF3C3C44",
+        "rim_bot": "#FF2E2E35",
+        "card_border": "#FF35353D",
+        "icon_bg": "#FFFFFFFF",
+        "icon_rim": "#FF3A3A42",
+        "muted": "#FFC8C8D0",
+        "faint": "#FF8E8E9A",
+        "track": "#FF3A3A42",
+        "pill_bg": "#FF34343C",
+        "chip": "#FF24242A",
+        "control_bg": "#FF2E2E36",
+        "control_border": "#FF3E3E48",
+        "control_hover": "#FF383842",
+        "accent_soft": _mix(accent, "#FF2A2A30", 0.18),
+        "accent_soft_hover": _mix(accent, "#FF2A2A30", 0.28),
+    })
 
 
 def _plan_label(value):
     raw = str(value or "").strip()
     known = {
         "pro": "Pro",
+        "prolite": "Pro",
         "plus": "Plus",
         "gemini": "Gemini",
         "x premium": "X Premium",
@@ -383,22 +617,50 @@ def _is_zero_money_metric(metric):
         return False
 
 
-def _visible_agents(data):
-    """Copy provider data while removing empty zero-money-only cards."""
-    visible = []
+def _is_inert_metric(metric):
+    """Drop facts that only say a disabled optional feature is off."""
+    if metric.get("pct") is not None:
+        return False
+    return str(metric.get("extra") or "").strip().casefold() in {
+        "off",
+        "disabled",
+        "inactive",
+    }
+
+
+def _partition_agents(data):
+    """Keep usable readings visible; cached values carry their original age."""
+    live = []
+    inactive = []
     for agent in data:
         copied = dict(agent)
+        inert = [
+            metric for metric in (agent.get("metrics") or [])
+            if _is_inert_metric(metric)
+        ]
         copied["metrics"] = [
             metric for metric in (agent.get("metrics") or [])
-            if not _is_zero_money_metric(metric)
+            if not _is_zero_money_metric(metric) and not _is_inert_metric(metric)
         ]
-        if copied["metrics"] or copied.get("err"):
-            visible.append(copied)
-    return visible
+        if (
+            copied["metrics"]
+            and copied.get("configured") is not False
+        ):
+            live.append(copied)
+        elif (copied.get("err") or inert) and copied.get("known", True):
+            if not copied.get("err"):
+                copied["_inactive_reason"] = str(inert[0].get("extra") or "inactive")
+            inactive.append(copied)
+    return live, inactive
+
+
+def _visible_agents(data):
+    """Return providers with a meaningful reading, including labelled cache."""
+    return _partition_agents(data)[0]
 
 
 
-def _provider_icon_markup(raw_name, theme, mark, accent, status_text="", status_color=None):
+def _provider_icon_markup(raw_name, theme, mark):
     name = raw_name.casefold()
     mapped = {
         "claude": "claude.png",
@@ -408,28 +670,27 @@ def _provider_icon_markup(raw_name, theme, mark, accent, status_text="", status_
         "antigravity": "antigravity.png",
     }.get(name, f"{name}.png")
 
+    # An app-icon tile: a solid squircle with a hairline, so artwork with its own
+    # transparency still sits on something instead of floating on the glass.
+    tile = (
+        f"""<Border CornerRadius="6" Background="{theme['icon_bg']}"
+                      BorderBrush="{theme['icon_rim']}" BorderThickness="1"/>"""
+    )
     icon_file = ASSETS_DIR / mapped
-    status_dot = f"""<Ellipse Width="6" Height="6" Fill="{status_color or GRAD['n']}"
-                              Stroke="{theme['chip']}" StrokeThickness="1.2"
-                              HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                              Margin="0,0,-1,-1" ToolTip="{_x(status_text)}"/>"""
-
     if icon_file.exists():
         uri = _x(icon_file.absolute().as_uri())
         return f"""
-            <Grid Width="18" Height="18" Margin="0,0,8,0" VerticalAlignment="Center">
-              <Border CornerRadius="5" Background="{theme['icon_bg']}" ClipToBounds="True">
-                <Image Source="{uri}" Width="15" Height="15" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
-              </Border>
-              {status_dot}
+            <Grid Width="22" Height="22" Margin="0,0,9,0" VerticalAlignment="Center">
+              {tile}
+              <Image Source="{uri}" Width="14" Height="14" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
             </Grid>"""
 
     return f"""
-            <Grid Width="18" Height="18" Margin="0,0,8,0" VerticalAlignment="Center">
-              <Border Background="{accent or theme['track']}" CornerRadius="5"/>
-              <TextBlock Text="{_x(mark or '?')}" Foreground="{theme['chip']}" FontSize="9.5"
-                         FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-              {status_dot}
+            <Grid Width="22" Height="22" Margin="0,0,9,0" VerticalAlignment="Center">
+              {tile}
+              <TextBlock Text="{_x(mark or '?')}" Foreground="{ICON_INK}"
+                         FontSize="{'8' if len(mark or '') > 1 else '10'}"
+                         FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Grid>"""
 
 
@@ -438,89 +699,139 @@ def _metric_row(
     theme,
     last=False,
 ):
-    """A quota visual: metadata above a full-width meter, or one amount line."""
+    """One quota on one line: name, meter, value, and when it turns over."""
     label_raw = _short_label(metric.get("label")) or "status"
     label = _x(label_raw)
     pct = metric.get("pct")
     extra = (metric.get("extra") or "").strip()
     reset = _x(metric.get("_reset_text") or "")
-    margin = "0" if last else "0,0,0,5"
+    margin = "0" if last else "0,0,0,1"
     tooltip = _x(metric.get("_tooltip") or "")
     tooltip_attr = f' ToolTip="{tooltip}"' if tooltip else ""
+    columns = f"""
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="{LABEL_COLUMN:.0f}"/>
+          <ColumnDefinition Width="{METER_COLUMN:.0f}"/>
+          <ColumnDefinition Width="{VALUE_COLUMN:.0f}"/>
+          <ColumnDefinition Width="{RESET_COLUMN:.0f}"/>
+        </Grid.ColumnDefinitions>"""
 
-    # Pure amount rows (balance/credits/extra): no meter.
+    # Pure amount rows (balance/credits/extra): no meter, so the value takes the
+    # width the meter would have used instead of being squeezed into a column
+    # sized for "100%".
     if pct is None:
-        value = _x(extra or "\u2014")
+        value = _x(extra or "—")
         return f"""
-        <Grid Tag="MetricAmount" Height="{AMOUNT_ROW_HEIGHT:.0f}" Margin="{margin}"{tooltip_attr}>
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="Auto"/>
-          </Grid.ColumnDefinitions>
-          <TextBlock Text="{label}" Foreground="{theme['faint']}"
+        <Grid Tag="MetricAmount" Height="{AMOUNT_ROW_HEIGHT:.0f}" Margin="{margin}"{tooltip_attr}>{columns}
+          <TextBlock Grid.ColumnSpan="2" Text="{label}" Foreground="{theme['muted']}"
                      FontSize="10.5" FontWeight="Medium" VerticalAlignment="Center"
                      TextTrimming="CharacterEllipsis"/>
-          <TextBlock Grid.Column="1" Text="{value}"
+          <TextBlock Grid.Column="2" Grid.ColumnSpan="2" Text="{value}"
                      Foreground="{theme['fg']}" FontSize="12" FontWeight="SemiBold"
-                     Margin="12,0,0,0" TextAlignment="Right"
+                     HorizontalAlignment="Right" Margin="8,0,0,0"
                      Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
         </Grid>"""
 
     pct = max(0.0, min(100.0, float(pct)))
-    fill_color = METER[_sevkey(pct)]
+    fill_color = theme[f"meter_{_sevkey(pct)}"]
     # Only currency extras replace the percentage. Count extras like 310/4000 cr
     # remain percentage-first so the usage visual stays comparable.
-    if extra and _looks_like_money(extra):
-        value = _x(extra)
-    else:
-        value = f"{pct:.0f}%"
+    money = bool(extra and _looks_like_money(extra))
+    value = _x(extra) if money else f"{pct:.0f}%"
+    value_color = fill_color if _sevkey(pct) == "r" else theme["fg"]
+    # A currency amount needs the reset column's width; a percentage never does.
+    value_span = ' Grid.ColumnSpan="2"' if money else ""
     reset_block = (
-        f"""<TextBlock Text="· {reset}" Foreground="{theme['faint']}" FontSize="9.5"
-                         Margin="6,0,0,0" VerticalAlignment="Center"
-                         Typography.NumeralAlignment="Tabular"/>"""
-        if reset
+        f"""<TextBlock Grid.Column="3" Text="{reset}" Foreground="{theme['faint']}"
+                     FontSize="9.5" HorizontalAlignment="Right" Margin="6,0,0,0"
+                     Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>"""
+        if reset and not money
         else ""
     )
     return f"""
-      <Grid Tag="MetricUsage" Height="{ROW_HEIGHT:.0f}" Margin="{margin}"{tooltip_attr}>
+      <Grid Tag="MetricUsage" Height="{ROW_HEIGHT:.0f}" Margin="{margin}"{tooltip_attr}>{columns}
+        <TextBlock Text="{label}" Foreground="{theme['muted']}" FontSize="11"
+                   FontWeight="Medium" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis"/>
+        <Grid Grid.Column="1" Height="{BAR_HEIGHT:.0f}" VerticalAlignment="Center"
+              Margin="{METER_INSET_LEFT:.0f},0,{METER_INSET_RIGHT:.0f},0">
+          <Border Background="{theme['track']}" CornerRadius="{BAR_HEIGHT / 2:.0f}"/>
+          <Border Width="{_bar_fill(pct):.1f}" HorizontalAlignment="Left"
+                  CornerRadius="{BAR_HEIGHT / 2:.0f}" Background="{fill_color}"/>
+        </Grid>
+        <TextBlock Grid.Column="2"{value_span} Text="{value}" Foreground="{value_color}"
+                   FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Right"
+                   Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
+        {reset_block}
+      </Grid>"""
+
+
+def _compact_quota(metric, theme):
+    """One always-visible Antigravity value in the four-column quota strip."""
+    label = _x(_short_label(metric.get("label")) or "quota")
+    window = _x(label.rsplit(" ", 1)[-1])
+    pct = max(0.0, min(100.0, float(metric.get("pct") or 0)))
+    reset = str(metric.get("_reset_text") or "").strip()
+    tooltip = _x(f"{label} · resets {reset}" if reset else label)
+    severity = _sevkey(pct)
+    value_color = theme[f"meter_{severity}"] if severity == "r" else theme["fg"]
+    return f"""
+      <Grid Tag="MetricCompact" Height="28" Margin="2,0" ToolTip="{tooltip}"
+            AutomationProperties.Name="{label} at {pct:.0f}%">
         <Grid.RowDefinitions>
-          <RowDefinition Height="Auto"/>
           <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="{pct:.0f}%" Foreground="{value_color}" FontSize="12"
+                   FontWeight="SemiBold" HorizontalAlignment="Center"
+                   Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
+        <TextBlock Tag="QuotaWindow" Grid.Row="1" Text="{window}"
+                   Foreground="{theme['faint']}" FontSize="9" FontWeight="Medium"
+                   HorizontalAlignment="Center" Margin="0,-1,0,0"/>
+      </Grid>"""
+
+
+def _quota_grid(metrics, theme):
+    order = {
+        "gemini week": 0,
+        "gemini session": 1,
+        "claude week": 2,
+        "claude session": 3,
+    }
+    metrics = sorted(metrics, key=lambda metric: order.get(str(metric.get("label")), 99))
+    return f"""
+      <Grid Tag="QuotaGrid" Height="40" Margin="0,-2,0,-2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="12"/>
+          <RowDefinition Height="28"/>
         </Grid.RowDefinitions>
         <Grid>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="{VALUE_COLUMN:.0f}"/>
+            <ColumnDefinition Width="*"/>
           </Grid.ColumnDefinitions>
-          <StackPanel Orientation="Horizontal" ClipToBounds="True">
-            <TextBlock Text="{label}" Foreground="{theme['muted']}"
-                       FontSize="10.5" FontWeight="Medium" VerticalAlignment="Center"
-                       TextTrimming="CharacterEllipsis"/>
-            {reset_block}
-          </StackPanel>
-          <TextBlock Grid.Column="1" Text="{value}" Foreground="{theme['fg']}"
-                     FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Right"
-                     Typography.NumeralAlignment="Tabular" VerticalAlignment="Center"/>
+          <TextBlock Tag="QuotaGroup" Text="gemini" Foreground="{theme['muted']}"
+                     FontSize="9" FontWeight="Medium" HorizontalAlignment="Center"/>
+          <TextBlock Tag="QuotaGroup" Grid.Column="1" Text="claude"
+                     Foreground="{theme['muted']}" FontSize="9" FontWeight="Medium"
+                     HorizontalAlignment="Center"/>
         </Grid>
-        <Grid Grid.Row="1" Height="{BAR_HEIGHT:.0f}" VerticalAlignment="Bottom" Margin="0,4,0,0">
-          <Border Background="{theme['track']}" CornerRadius="3"/>
-          <Border Width="{_bar_fill(pct):.1f}" HorizontalAlignment="Left"
-                  CornerRadius="3" Background="{fill_color}"/>
-        </Grid>
+        <UniformGrid Tag="QuotaValues" Grid.Row="1" Columns="4">
+          {''.join(_compact_quota(metric, theme) for metric in metrics)}
+        </UniformGrid>
+        <Border Grid.RowSpan="2" Width="1" Margin="0,2,0,0"
+                HorizontalAlignment="Center" Background="{theme['card_border']}"/>
       </Grid>"""
 
 
 def _mark_for(name):
     """API-key providers are user-configurable, so their mark comes from the name."""
-    letters = [char for char in str(name) if char.isalnum()]
-    return letters[0].upper() if letters else "?"
-
-
-def _accent_for(name):
-    # Deterministic across restarts on purpose: Python's str hash is salted per
-    # process, which would repaint every provider a new colour on each launch.
-    checksum = sum(ord(char) for char in str(name))
-    return API_ACCENTS[checksum % len(API_ACCENTS)]
+    raw = str(name or "")
+    words = re.findall(r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+", raw)
+    if len(words) > 1:
+        return "".join(word[0] for word in words[:2]).upper()
+    letters = [char for char in raw if char.isalnum()]
+    return "".join(letters[:2]).upper() if letters else "?"
 
 
 def _headline(metrics):
@@ -529,15 +840,6 @@ def _headline(metrics):
     if scored:
         return max(scored, key=lambda metric: metric["pct"])
     return metrics[0]
-
-
-def _split_zero_metrics(metrics):
-    """Return visible metrics plus zero-percent quotas worth disclosing on demand."""
-    zeroes = [metric for metric in metrics if metric.get("pct") == 0]
-    if len(zeroes) < 2:
-        return metrics, []
-
-    return [metric for metric in metrics if metric.get("pct") != 0], zeroes
 
 
 ANTIGRAVITY_QUOTA_LABELS = {
@@ -560,62 +862,31 @@ def _display_metric(metric, provider_name):
     return displayed
 
 
-def _zero_quota_expander(zeroes, theme, provider_name):
-    """Native keyboard-accessible disclosure for quota periods at exactly 0%."""
-    details = []
-    for metric in zeroes:
-        label = _short_label(metric.get("label")) or "quota"
-        reset = metric.get("_reset_text") or ""
-        details.append(f"{label} at 0% · resets {reset}" if reset else f"{label} at 0%")
-
-    rows = "".join(
-        _metric_row(metric, theme, last=index == len(zeroes) - 1)
-        for index, metric in enumerate(zeroes)
-    )
-    count = len(zeroes)
-    label = f"{count} quotas at 0%"
-    return f"""
-        <Expander Tag="ZeroUsage:{_x(provider_name)}" IsExpanded="False"
-                  HorizontalContentAlignment="Stretch" Cursor="Hand"
-                  AutomationProperties.Name="{_x(label)}; expand for details"
-                  ToolTip="{_x('; '.join(details))}">
-          <Expander.Header>
-            <Grid Width="{CONTENT_WIDTH - 24:.0f}" Height="{AMOUNT_ROW_HEIGHT:.0f}">
-              <TextBlock Text="{_x(label)}" Foreground="{theme['faint']}"
-                         FontSize="10.5" FontWeight="Medium" VerticalAlignment="Center"/>
-            </Grid>
-          </Expander.Header>
-          <StackPanel Margin="18,6,0,0">{rows}</StackPanel>
-        </Expander>"""
-
-
 def _card(agent, theme, last=False):
+    """Render one live provider inside the shared usage surface."""
     raw_name = agent.get("agent") or "Unknown"
     name = "Antigravity" if raw_name == "Antigrav" else raw_name
     mark = PROVIDER_MARKS.get(raw_name) or _mark_for(name)
-    accent = PROVIDER_ACCENTS.get(raw_name) or _accent_for(name)
 
     metrics = [
         _display_metric(metric, name)
         for metric in (agent.get("metrics") or [])
-        if not _is_zero_money_metric(metric)
+        if not _is_zero_money_metric(metric) and not _is_inert_metric(metric)
     ]
-    zeroes = []
-    if agent.get("compact") and metrics:
+    # Antigravity owns four independent quota windows.  "Compact" may reduce
+    # other API providers to a headline, but it must never hide these four facts.
+    if agent.get("compact") and name != "Antigravity" and metrics:
         metrics = [_headline(metrics)]
-    else:
-        metrics, zeroes = _split_zero_metrics(metrics)
-    status_text = agent.get("_status_text") or "unavailable"
-    status_color = agent.get("_status_color") or GRAD["n"]
-    icon = _provider_icon_markup(name, theme, mark, accent, status_text, status_color)
-    if metrics or zeroes:
-        row_parts = [
-            _metric_row(metric, theme, last=index == len(metrics) - 1 and not zeroes)
+    icon = _provider_icon_markup(name, theme, mark)
+    if name == "Antigravity" and len(metrics) > 1 and all(
+        metric.get("pct") is not None for metric in metrics
+    ):
+        rows = _quota_grid(metrics, theme)
+    elif metrics:
+        rows = "".join(
+            _metric_row(metric, theme, last=index == len(metrics) - 1)
             for index, metric in enumerate(metrics)
-        ]
-        if zeroes:
-            row_parts.append(_zero_quota_expander(zeroes, theme, name))
-        rows = "".join(row_parts)
+        )
     else:
         rows = _metric_row(
             {"label": "", "pct": None, "extra": agent.get("err") or "no data"},
@@ -623,28 +894,272 @@ def _card(agent, theme, last=False):
             last=True,
         )
 
-    margin = "0" if last else "0,0,0,7"
-    return f"""
-    <Border BorderBrush="{theme['card_border']}" BorderThickness="1" CornerRadius="10"
-            Padding="{CARD_PADDING:.0f},8,{CARD_PADDING:.0f},9" Margin="{margin}">
-      <Border.Background>
-        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-          <GradientStop Color="{theme['card_top']}" Offset="0"/>
-          <GradientStop Color="{theme['card_bg']}" Offset="1"/>
-        </LinearGradientBrush>
-      </Border.Background>
+    is_antigravity_strip = name == "Antigravity" and 'Tag="QuotaGrid"' in rows
+    header_margin = "0" if not rows else "0,0,0,5" if is_antigravity_strip else "0,0,0,7"
+    card_padding = (
+        f"{CARD_PADDING:.0f},10,{CARD_PADDING:.0f},9"
+        if is_antigravity_strip
+        else f"{CARD_PADDING:.0f},10,{CARD_PADDING:.0f},10"
+    )
+    plan = _plan_label(agent.get("plan"))
+    if agent.get("_freshness"):
+        plan = agent["_freshness"]
+    plan_markup = (
+        f"""<Border Grid.Column="1" Background="{theme['pill_bg']}" CornerRadius="{CAPSULE_RADIUS:.0f}"
+                      Padding="7,1,7,2" Margin="8,0,0,0" VerticalAlignment="Center">
+            <TextBlock Text="{_x(plan)}" Foreground="{theme['muted']}" FontSize="9.5"
+                       FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          </Border>"""
+        if plan
+        else ""
+    )
+    body = f"""
       <StackPanel>
-        <Grid Tag="ProviderHeader" Height="{PROVIDER_HEADER_HEIGHT:.0f}" Margin="0,0,0,7">
-          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" ClipToBounds="True">
+        <Grid Tag="ProviderHeader" Height="{PROVIDER_HEADER_HEIGHT:.0f}" Margin="{header_margin}">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" ClipToBounds="True">
             {icon}
-            <TextBlock Text="{_x(name)}" Foreground="{theme['fg']}" FontSize="12.5"
+            <TextBlock Text="{_x(name)}" Foreground="{theme['fg']}" FontSize="13"
                        FontWeight="SemiBold" VerticalAlignment="Center"
                        MaxWidth="{NAME_MAX_WIDTH:.0f}" TextTrimming="CharacterEllipsis"/>
           </StackPanel>
+          {plan_markup}
         </Grid>
         {rows}
-      </StackPanel>
+      </StackPanel>"""
+    return _platter(
+        "ProviderRow",
+        theme,
+        body,
+        padding=card_padding,
+        margin="0" if last else f"0,0,0,{PLATTER_GAP:.0f}",
+        tooltip=agent.get("_freshness_detail") or "",
+    )
+
+
+def _rim(theme, top="rim_top", bottom="rim_bot"):
+    """Glass edge: lit along the top, falling away towards the bottom."""
+    return f"""<LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+          <GradientStop Color="{theme[top]}" Offset="0"/>
+          <GradientStop Color="{theme[bottom]}" Offset="1"/>
+        </LinearGradientBrush>"""
+
+
+def _platter(tag, theme, body, padding, margin="0", tooltip=""):
+    """One raised pane of glass: a sheen that is brightest along the top, under
+    a rim that catches the light there and falls away towards the bottom."""
+    tooltip_attr = f' ToolTip="{_x(tooltip)}"' if tooltip else ""
+    return f"""
+    <Border Tag="{tag}" BorderThickness="{CARD_BORDER:.0f}"
+            CornerRadius="{SURFACE_CORNER_RADIUS:.0f}" Padding="{padding}"
+            Margin="{margin}"{tooltip_attr}>
+      <Border.Background>
+        {_rim(theme, "card_hi", "card_bg")}
+      </Border.Background>
+      <Border.BorderBrush>
+        {_rim(theme)}
+      </Border.BorderBrush>{body}
     </Border>"""
+
+
+def _needs_claude_sign_in(agent):
+    """Claude Code itself is signed out or its session lapsed: one click fixes it."""
+    if agent.get("agent") != "Claude" or agent.get("cached_at"):
+        return False
+    reason = str(agent.get("err") or "").casefold()
+    return any(term in reason for term in ("signed out", "sign-in expired", "access token"))
+
+
+SIGN_IN_TOOLTIP = (
+    "Claude Code is signed out, so Fleet has no Claude usage to read. "
+    "Sign in opens a console running claude auth login."
+)
+
+
+def _inactive_state(agent, fleet):
+    reason = str(agent.get("err") or agent.get("_inactive_reason") or "not active").strip()
+    tooltip = reason
+    if agent.get("cached_at"):
+        age = fleet._age(agent["cached_at"])
+        tooltip = f"{reason} · {age} old"
+        label = "cached"
+    elif _needs_claude_sign_in(agent):
+        label, tooltip = "signed out", SIGN_IN_TOOLTIP
+    else:
+        lowered = reason.casefold()
+        if "access token" in lowered:
+            label = "no access"
+        elif "credentials" in lowered:
+            label = "not connected"
+        elif "expired" in lowered:
+            label = "expired"
+        elif "not running" in lowered or "closed" in lowered:
+            label = "not running"
+        else:
+            label = reason.split(" · ", 1)[0]
+    return label, tooltip
+
+
+def _capsule_button_template(background, hover, rim=None):
+    """A pill-shaped glass button; `rim` is (top, bottom) token colours or None."""
+    if rim:
+        border = f"""BorderThickness="1">
+            <Border.BorderBrush>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                <GradientStop Color="{rim[0]}" Offset="0"/>
+                <GradientStop Color="{rim[1]}" Offset="1"/>
+              </LinearGradientBrush>
+            </Border.BorderBrush>"""
+    else:
+        border = 'BorderThickness="0">'
+    return f"""
+      <Button.Template>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="Chrome" Background="{background}" CornerRadius="{CAPSULE_RADIUS + 2:.0f}"
+                  Padding="{{TemplateBinding Padding}}" {border}
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Chrome" Property="Background" Value="{hover}"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="Chrome" Property="Opacity" Value="0.8"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter TargetName="Chrome" Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Button.Template>"""
+
+
+def _sign_in_button(theme):
+    return f"""
+        <Button Grid.Column="1" Tag="ClaudeSignIn" Cursor="Hand" Padding="10,2,10,3"
+                Margin="10,0,0,0" VerticalAlignment="Center"
+                AutomationProperties.Name="Sign in to Claude Code">{_capsule_button_template(theme['accent_soft'], theme['accent_soft_hover'])}
+          <TextBlock Text="Sign in" Foreground="{theme['meter_g']}" FontSize="10"
+                     FontWeight="SemiBold"/>
+        </Button>"""
+
+
+def _inactive_row(agent, theme, fleet):
+    raw_name = agent.get("agent") or "Unknown"
+    name = "Antigravity" if raw_name == "Antigrav" else raw_name
+    mark = PROVIDER_MARKS.get(raw_name) or _mark_for(name)
+    label, tooltip = _inactive_state(agent, fleet)
+    icon = _provider_icon_markup(name, theme, mark)
+    status = (
+        _sign_in_button(theme)
+        if _needs_claude_sign_in(agent)
+        else f"""
+        <TextBlock Grid.Column="1" Text="{_x(label)}" Foreground="{theme['faint']}"
+                   FontSize="10" Margin="10,0,0,0" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis"/>"""
+    )
+    return f"""
+      <Grid Tag="InactiveProvider" Height="34" Margin="10,0,8,0" ToolTip="{_x(tooltip)}">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" ClipToBounds="True"
+                    Opacity="0.82">
+          {icon}
+          <TextBlock Text="{_x(name)}" Foreground="{theme['muted']}" FontSize="11.5"
+                     FontWeight="Medium" VerticalAlignment="Center"
+                     TextTrimming="CharacterEllipsis"/>
+        </StackPanel>{status}
+      </Grid>"""
+
+
+# Segoe Fluent Icons ships with Windows 11; MDL2 is the Windows 10 fallback.
+ICON_FONT = "Segoe Fluent Icons, Segoe MDL2 Assets"
+GLYPH_CHEVRON_DOWN = "&#xE70D;"
+GLYPH_CHEVRON_UP = "&#xE70E;"
+GLYPH_REFRESH = "&#xE72C;"
+
+# The stock Expander draws a circular chevron button that floats outside the
+# surface. Templating it away is the only way to get a flat disclosure row.
+EXPANDER_TEMPLATE = """
+    <Expander.Template>
+      <ControlTemplate TargetType="Expander">
+        <StackPanel>
+          <ToggleButton Cursor="Hand" Focusable="True"
+                        HorizontalContentAlignment="Stretch"
+                        IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+            <ToggleButton.Template>
+              <ControlTemplate TargetType="ToggleButton">
+                <Border Background="Transparent" Padding="2,3" CornerRadius="5">
+                  <ContentPresenter HorizontalAlignment="Stretch"/>
+                </Border>
+              </ControlTemplate>
+            </ToggleButton.Template>
+            <ContentPresenter ContentSource="Header"/>
+          </ToggleButton>
+          <ContentPresenter x:Name="ExpandSite" Visibility="Collapsed"/>
+        </StackPanel>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsExpanded" Value="True">
+            <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible"/>
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Expander.Template>"""
+
+CHEVRON_STYLE = """
+        <TextBlock.Style>
+          <Style TargetType="TextBlock">
+            <Setter Property="Text" Value="%s"/>
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding IsExpanded, RelativeSource={RelativeSource AncestorType=Expander}}" Value="True">
+                <Setter Property="Text" Value="%s"/>
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </TextBlock.Style>""" % (GLYPH_CHEVRON_DOWN, GLYPH_CHEVRON_UP)
+
+def _refresh_button_template(theme):
+    return _capsule_button_template(
+        theme["control_bg"],
+        theme["control_hover"],
+        rim=(theme["rim_top"], theme["control_border"]),
+    )
+
+
+def _inactive_section(agents, theme, fleet):
+    if not agents:
+        return ""
+    rows = []
+    for index, agent in enumerate(agents):
+        rows.append(_inactive_row(agent, theme, fleet))
+        if index < len(agents) - 1:
+            rows.append(
+                f'<Border Height="1" Margin="41,0,10,0" Background="{theme["card_border"]}"/>'
+            )
+    count = len(agents)
+    surface = _platter(
+        "InactiveSurface", theme, f"<StackPanel>{''.join(rows)}</StackPanel>",
+        padding="0", margin="0,5,0,0",
+    )
+    return f"""
+  <Expander Tag="InactiveProviders" IsExpanded="False" Margin="0,8,0,0"
+            HorizontalContentAlignment="Stretch" Foreground="{theme['faint']}">{EXPANDER_TEMPLATE}
+    <Expander.Header>
+      <Grid HorizontalAlignment="Stretch" Margin="2,0,4,0">
+        <TextBlock Text="{count} inactive" Foreground="{theme['muted']}" FontSize="10.5"
+                   FontWeight="Medium" VerticalAlignment="Center"/>
+        <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
+                   FontFamily="{ICON_FONT}" FontSize="8"
+                   Foreground="{theme['muted']}">{CHEVRON_STYLE}
+        </TextBlock>
+      </Grid>
+    </Expander.Header>{surface}
+  </Expander>"""
 
 
 def _content_xaml(data, ts, light, fleet, acrylic=True):
@@ -656,74 +1171,95 @@ def _content_xaml(data, ts, light, fleet, acrylic=True):
     """
     import time
 
-    data = _visible_agents(data)
+    live, inactive = _partition_agents(data)
     theme = _theme(light, acrylic=acrylic)
-    cards = []
-    for index, agent in enumerate(data):
+    rows = []
+    for index, agent in enumerate(live):
         copied = dict(agent)
-        if not agent.get("err"):
-            copied["_status_text"], copied["_status_color"] = "live", GRAD["g"]
-        elif agent.get("metrics"):
-            age = (
-                f" · {fleet._age(agent['cached_at'])} old"
-                if agent.get("cached_at")
-                else ""
-            )
-            copied["_status_text"], copied["_status_color"] = f"cached{age}", GRAD["y"]
-        else:
-            reason = agent.get("err") or "no data"
-            copied["_status_text"] = f"unavailable · {reason}"
-            copied["_status_color"] = GRAD["r"]
+        source = agent.get("source")
+        if source and not agent.get("err"):
+            # A named local source is a real reading on its own sampling clock,
+            # not a Fleet cache, and saying "cached" about it would be a lie.
+            age = fleet._age(agent.get("cached_at") or ts)
+            copied["_freshness"] = f"{source} · {age} old"
+            copied["_freshness_detail"] = f"read from the {source} app · {age} old"
+        elif agent.get("err") or agent.get("cached_at"):
+            age = fleet._age(agent.get("cached_at") or ts)
+            copied["_freshness"] = f"cached · {age} old"
+            copied["_freshness_detail"] = f"{agent.get('err') or 'cached reading'} · {age} old"
         copied["metrics"] = []
         for metric in agent.get("metrics") or []:
             item = dict(metric)
             item["_reset_text"] = fleet._until(item["resets"]) if item.get("resets") else ""
             copied["metrics"].append(item)
-        cards.append(_card(copied, theme, last=index == len(data) - 1))
+        rows.append(_card(copied, theme, last=index == len(live) - 1))
 
-    clock = time.strftime("%H:%M", time.localtime(ts))
-    failures = [agent for agent in data if agent.get("err")]
-    cached = [agent for agent in failures if agent.get("metrics")]
-    cached_times = [agent.get("cached_at") for agent in cached if agent.get("cached_at")]
-    if not data:
-        status_text, status_color = "no data", GRAD["n"]
-    elif cached:
-        live_count = len(data) - len(failures)
-        age = f"{fleet._age(min(cached_times))} old" if cached_times else "cache"
-        status_text, status_color = f"{live_count}/{len(data)} live · {age}", GRAD["y"]
-    elif failures:
-        status_text = f"{len(data) - len(failures)}/{len(data)} live · error"
-        status_color = GRAD["r"]
+    if rows:
+        # No shared slab any more: each provider is its own pane of glass, and the
+        # gaps between them are where the desktop blur shows through.
+        live_surface = f"""
+  <StackPanel Tag="LiveSurface">{''.join(rows)}</StackPanel>"""
     else:
-        status_text, status_color = f"live · {clock}", GRAD["g"]
+        live_surface = _platter(
+            "EmptySurface",
+            theme,
+            f"""
+      <TextBlock Text="no live usage" Foreground="{theme['muted']}" FontSize="11"
+                 HorizontalAlignment="Center"/>""",
+            padding="10,14",
+        )
+
+    status_text, status_color = _freshness_status(live, ts)
+    inactive_section = _inactive_section(inactive, theme, fleet)
     return f"""
 <StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
             x:Name="ContentRoot" Opacity="1">
-  <Grid Height="24" Margin="2,0,2,9">
-    <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="Auto"/>
-      <ColumnDefinition Width="*"/>
-      <ColumnDefinition Width="Auto"/>
-    </Grid.ColumnDefinitions>
-    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-      <Border Width="3" Height="14" Background="{METER['g']}" CornerRadius="1.5"
-              Margin="0,0,7,0"/>
-      <TextBlock Text="fleet" Foreground="{theme['fg']}" FontSize="13.5"
-                 FontWeight="SemiBold" VerticalAlignment="Center"/>
-      <TextBlock Text="usage" Foreground="{theme['faint']}" FontSize="10.5"
-                 Margin="7,1,0,0" VerticalAlignment="Center"/>
-    </StackPanel>
-    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-      <Ellipse Width="6" Height="6" Fill="{status_color}" Margin="0,0,6,0"
-               VerticalAlignment="Center"/>
-      <TextBlock Text="{_x(status_text)}" Foreground="{theme['muted']}"
-                 FontSize="10" FontWeight="Medium" Typography.NumeralAlignment="Tabular"
+  <Grid Height="24" Margin="4,0,0,8">
+    <TextBlock Text="fleet" Foreground="{theme['fg']}" FontSize="14"
+               FontWeight="SemiBold" VerticalAlignment="Center"/>
+    <Border Tag="StatusCapsule" HorizontalAlignment="Right" VerticalAlignment="Center"
+            Background="{theme['pill_bg']}" CornerRadius="{CAPSULE_RADIUS:.0f}" Padding="8,2,9,3">
+      <StackPanel Orientation="Horizontal">
+        <Ellipse Width="6" Height="6" Fill="{status_color}" Margin="0,1,6,0"
                  VerticalAlignment="Center"/>
-    </StackPanel>
+        <TextBlock Text="{_x(status_text)}" Foreground="{theme['muted']}"
+                   FontSize="10" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular"
+                   VerticalAlignment="Center"/>
+      </StackPanel>
+    </Border>
   </Grid>
-  {''.join(cards)}
+  {live_surface}
+  {inactive_section}
+  <Grid Margin="4,10,0,0" Height="26">
+    <TextBlock Text="updates every 2 min" Foreground="{theme['faint']}" FontSize="10"
+               VerticalAlignment="Center"/>
+    <Button x:Name="RefreshButton" HorizontalAlignment="Right" Cursor="Hand"
+            Foreground="{theme['fg']}" FontSize="10.5" Padding="11,3,13,4"
+            AutomationProperties.Name="Refresh usage now">{_refresh_button_template(theme)}
+      <StackPanel Orientation="Horizontal">
+        <TextBlock Text="{GLYPH_REFRESH}" FontFamily="{ICON_FONT}" FontSize="10"
+                   Margin="0,1,6,0" VerticalAlignment="Center"/>
+        <TextBlock Text="Refresh" FontWeight="SemiBold" VerticalAlignment="Center"/>
+      </StackPanel>
+    </Button>
+  </Grid>
 </StackPanel>"""
+
+
+def _freshness_status(providers, ts, now=None):
+    now = time.time() if now is None else now
+    age = max(0, now - ts)
+    if not providers:
+        return "no readings", GRAD["n"]
+    if age > 300:
+        label = f"{int(age / 3600)}h" if age >= 3600 else f"{int(age / 60)}m"
+        return f"updated {label} ago", GRAD["y"]
+    fresh = sum(not p.get("err") and not p.get("cached_at") for p in providers)
+    clock = time.strftime("%H:%M", time.localtime(ts))
+    if fresh != len(providers):
+        return f"{fresh} live · {len(providers) - fresh} cached", GRAD["y"]
+    return f"{fresh} live · {clock}", GRAD["g"]
 
 
 def _xaml(data, ts, light, fleet, acrylic=True):
@@ -760,7 +1296,11 @@ def _xaml(data, ts, light, fleet, acrylic=True):
       </LinearGradientBrush>
     </Border.BorderBrush>
     <Border.Background>
-      <SolidColorBrush Color="{theme['surface']}"/>
+      <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="{theme['surface_hi']}" Offset="0.0"/>
+        <GradientStop Color="{theme['surface']}" Offset="0.35"/>
+        <GradientStop Color="{theme['surface']}" Offset="1.0"/>
+      </LinearGradientBrush>
     </Border.Background>
     <Border.RenderTransform>
       <TranslateTransform x:Name="SlideTransform" Y="0"/>
@@ -831,6 +1371,7 @@ def _run_panel_host_sta(state_loader, light_loader, fleet, signal_path, quit_pat
     current = {"window": None, "present": None, "swap": None, "ts": None, "light": None}
     last_signal = {"mtime": 0}
     refresh_check = {"at": 0.0}
+    heartbeat_at = {"at": 0.0}
     stopping = {"value": False}
 
     def build():
@@ -866,8 +1407,8 @@ def _run_panel_host_sta(state_loader, light_loader, fleet, signal_path, quit_pat
             current["present"](anchor_rect)
             return
         data, ts = state_loader()
-        if current["ts"] != ts or current["light"] != light_loader():
-            sync(data, ts, light_loader())
+        # Even unchanged readings age while the panel is hidden.
+        sync(data, ts, light_loader())
         current["present"](anchor_rect)
 
     # Pay XAML parsing/JIT cost invisibly so the first user click is fast.
@@ -891,7 +1432,7 @@ def _run_panel_host_sta(state_loader, light_loader, fleet, signal_path, quit_pat
         try:
             changed = signal_path.stat().st_mtime_ns
         except OSError:
-            return
+            changed = 0
         if changed > last_signal["mtime"]:
             last_signal["mtime"] = changed
             anchor_rect = None
@@ -904,17 +1445,21 @@ def _run_panel_host_sta(state_loader, light_loader, fleet, signal_path, quit_pat
                 pass
             present(anchor_rect)
         now = time.monotonic()
+        if now - heartbeat_at["at"] >= 10:
+            heartbeat = signal_path.with_name("panel-heartbeat.json")
+            heartbeat.write_text(json.dumps({"pid": os.getpid(), "ts": time.time()}))
+            heartbeat_at["at"] = now
         window = current["window"]
         if window is None:
             if not stopping["value"]:
                 build()
             return
         # State swaps are local and cheap; keep an open panel current too.
-        if now - refresh_check["at"] >= 0.75:
+        if now - refresh_check["at"] >= 15:
             refresh_check["at"] = now
             data, ts = state_loader()
             light = light_loader()
-            if current["ts"] != ts or current["light"] != light:
+            if window.IsVisible or current["ts"] != ts or current["light"] != light:
                 sync(data, ts, light)
 
     timer.Tick += tick
@@ -924,8 +1469,14 @@ def _run_panel_host_sta(state_loader, light_loader, fleet, signal_path, quit_pat
 
 def _create_window(data, ts, light, fleet, auto_present=True):
     from System import TimeSpan
-    from System.Windows import Duration, LogicalTreeHelper, SystemParameters, UIElement
-    from System.Windows.Controls import Expander
+    from System.Windows import (
+        Duration,
+        LogicalTreeHelper,
+        RoutedEventHandler,
+        SystemParameters,
+        UIElement,
+    )
+    from System.Windows.Controls import Button, Expander
     from System.Windows.Interop import HwndSource, WindowInteropHelper
     from System.Windows.Markup import XamlReader
     from System.Windows.Media import Colors, SolidColorBrush, VisualTreeHelper
@@ -938,7 +1489,7 @@ def _create_window(data, ts, light, fleet, auto_present=True):
     from System.Windows.Media import TranslateTransform
     from System.Windows.Threading import DispatcherTimer
 
-    want_acrylic = not _force_opaque()
+    want_acrylic = _material() != "opaque"
     theme = _theme(light, acrylic=want_acrylic)
     window = XamlReader.Parse(_xaml(data, ts, light, fleet, acrylic=want_acrylic))
     glass_clip = window.FindName("GlassClip")
@@ -948,34 +1499,49 @@ def _create_window(data, ts, light, fleet, auto_present=True):
         glass_clip.RenderTransform = slide_transform
     chrome = {"acrylic": False}
 
-    def zero_expansion_state(root):
-        """Capture disclosure state before a live content fragment is replaced."""
-        states = {}
-        stack = [root] if root is not None else []
+    def content_controls(root):
+        controls = []
+        stack = [root]
         while stack:
             node = stack.pop()
-            if isinstance(node, Expander):
-                tag = str(node.Tag or "")
-                if tag.startswith("ZeroUsage:"):
-                    states[tag] = bool(node.IsExpanded)
-            try:
-                stack.extend(child for child in LogicalTreeHelper.GetChildren(node) if child is not None)
-            except Exception:
-                pass
-        return states
+            if isinstance(node, (Button, Expander)):
+                controls.append(node)
+            if isinstance(node, UIElement):
+                stack.extend(child for child in LogicalTreeHelper.GetChildren(node)
+                             if isinstance(child, UIElement))
+        return controls
 
-    def restore_zero_expansion(root, states):
-        stack = [root] if root is not None else []
-        while stack:
-            node = stack.pop()
-            if isinstance(node, Expander):
-                tag = str(node.Tag or "")
-                if tag in states:
-                    node.IsExpanded = states[tag]
-            try:
-                stack.extend(child for child in LogicalTreeHelper.GetChildren(node) if child is not None)
-            except Exception:
-                pass
+    def request_refresh(sender, event):
+        (fleet.CACHE / "refresh.request").write_text(str(time.time_ns()))
+        sender.Content = "refreshing…"
+        sender.IsEnabled = False
+
+    def sign_in(sender, event):
+        # The console owns the sign-in; once it closes, ask the tray for a fresh
+        # poll so Claude moves into the live list without waiting two minutes.
+        launch = getattr(fleet, "claude_sign_in", None)
+        started = launch is not None and launch(
+            on_exit=lambda: (fleet.CACHE / "refresh.request").write_text(str(time.time_ns()))
+        )
+        if started:
+            sender.IsEnabled = False
+            close_animated()
+        else:
+            sender.ToolTip = "Claude Code is not installed"
+
+    def route_click(sender, event):
+        button = event.Source
+        if isinstance(button, Button) and button.Name == "RefreshButton":
+            request_refresh(button, event)
+        elif isinstance(button, Button) and str(button.Tag) == "ClaudeSignIn":
+            sign_in(button, event)
+
+    # One routed handler on the long-lived GlassClip serves every swapped-in
+    # fragment. pythonnet's `button.Click += handler` keeps the button, and
+    # through its parents the whole fragment, alive until a matching `-=`, so
+    # wiring each fragment's buttons pinned every one a swap replaced: about
+    # 175 KB per state change, ~130 MB a day for a host that runs for days.
+    glass_clip.AddHandler(Button.ClickEvent, RoutedEventHandler(route_click))
 
     def swap_content(new_data, new_ts):
         """Replace the panel's contents without touching the window or its HWND.
@@ -984,12 +1550,15 @@ def _create_window(data, ts, light, fleet, auto_present=True):
         the old code paid that on every dismiss because it closed the window
         instead of hiding it. Parsing this fragment costs a few ms.
         """
-        expanded = zero_expansion_state(glass_clip.Child)
+        expanded = {str(control.Tag): bool(control.IsExpanded)
+                    for control in content_controls(glass_clip.Child) if isinstance(control, Expander)}
         fragment = XamlReader.Parse(
             _content_xaml(new_data, new_ts, light, fleet, acrylic=chrome["acrylic"])
         )
-        restore_zero_expansion(fragment, expanded)
         glass_clip.Child = fragment
+        for control in content_controls(fragment):
+            if isinstance(control, Expander) and str(control.Tag) in expanded:
+                control.IsExpanded = expanded[str(control.Tag)]
         window.UpdateLayout()
         if window.IsVisible:
             position(anchor["rect"])
@@ -1041,6 +1610,10 @@ def _create_window(data, ts, light, fleet, auto_present=True):
             )
 
     window.SourceInitialized += source_ready
+
+    def light_backdrop():
+        if chrome["acrylic"]:
+            _light_backdrop(native["hwnd"])
 
     def position(anchor_rect=None):
         point = ctypes.wintypes.POINT()
@@ -1110,6 +1683,7 @@ def _create_window(data, ts, light, fleet, auto_present=True):
     def begin_open_slide():
         """GPU-friendly content motion. Window stays put — no Top animation."""
         closing["value"] = False
+        light_backdrop()
         if not SystemParameters.ClientAreaAnimation:
             clear_motion()
             window.Opacity = 1.0
@@ -1209,7 +1783,14 @@ def _create_window(data, ts, light, fleet, auto_present=True):
                 close_animated()
 
         deactivate.Tick += finish_deactivation
-        window.Deactivated += lambda sender, event: (deactivate.Stop(), deactivate.Start())
+        # Losing focus would flatten the glass for the whole fade-out; keep it
+        # lit. Deactivation arrives inside a system-sent activation message, so
+        # the re-light waits for its own dispatcher frame (see take_foreground).
+        window.Deactivated += lambda sender, event: (
+            _defer_to_dispatcher(window.Dispatcher, light_backdrop),
+            deactivate.Stop(),
+            deactivate.Start(),
+        )
         window.Activated += lambda sender, event: deactivate.Stop()
 
         # Also watch every mouse button so clicks on non-activating surfaces

@@ -1,12 +1,22 @@
 ; Build with Inno Setup 6.  The installer is per-user: no admin prompt needed.
-; scripts\build-release.ps1 must run first: it produces dist\Fleet.exe and the
-; generated icon under build\assets.
+; scripts\build-release.ps1 must run first: it produces dist\Fleet\.
 #define AppName "Fleet"
 #define AppVersion GetEnv("FLEET_VERSION")
 #if AppVersion == ""
   #define AppVersion "dev"
 #endif
-#define AppIcon "..\build\assets\fleet.ico"
+#define BuildRoot GetEnv("FLEET_BUILD_ROOT")
+#if BuildRoot == ""
+  #define BuildRoot "..\dist\Fleet"
+#endif
+#define InstallerOutputRoot GetEnv("FLEET_OUTPUT_ROOT")
+#if InstallerOutputRoot == ""
+  #define InstallerOutputRoot "..\dist"
+#endif
+#define AppIcon GetEnv("FLEET_APP_ICON")
+#if AppIcon == ""
+  #define AppIcon "..\build\assets\fleet.ico"
+#endif
 ; Set by CI from the repository it builds from; left blank for local builds so
 ; the installer never advertises a URL that does not exist.
 #define RepoUrl GetEnv("FLEET_REPO_URL")
@@ -24,7 +34,7 @@ AppUpdatesURL={#RepoUrl}/releases
 DefaultDirName={localappdata}\Fleet
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-OutputDir=..\dist
+OutputDir={#InstallerOutputRoot}
 OutputBaseFilename=Fleet-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
@@ -42,20 +52,30 @@ SetupIconFile={#AppIcon}
 #endif
 
 [Files]
-Source: "..\dist\Fleet.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autostartup}\Fleet"; Filename: "{app}\Fleet.exe"; Tasks: startup
 Name: "{autoprograms}\Fleet"; Filename: "{app}\Fleet.exe"
+Name: "{autostartup}\Fleet"; Filename: "{app}\Fleet.exe"; Tasks: startup
 Name: "{autoprograms}\Uninstall Fleet"; Filename: "{uninstallexe}"
 
 [Run]
+; Remove the legacy recovery task when upgrading; startup is a plain shortcut.
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""Fleet Recovery"" /F"; Flags: runhidden waituntilterminated
 Filename: "{app}\Fleet.exe"; Description: "Launch Fleet now"; Flags: nowait postinstall skipifsilent
 
+[InstallDelete]
+Type: files; Name: "{autostartup}\Fleet.lnk"
+Type: files; Name: "{app}\scripts\fleet-guard.ps1"
+Type: files; Name: "{app}\scripts\fleet-guard-hidden.vbs"
+
+[UninstallRun]
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""Fleet Recovery"" /F"; Flags: runhidden waituntilterminated
+
 [Tasks]
-Name: "startup"; Description: "Start Fleet when I sign in"; Flags: unchecked
+Name: "startup"; Description: "Start Fleet when I sign in"
 
 ; Runtime state is derived from local provider credentials, so uninstalling must
 ; not leave it behind.
