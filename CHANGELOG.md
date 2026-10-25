@@ -1,5 +1,22 @@
 # changelog
 
+## 0.4.0 - 2026-10-26
+
+- added a **Dashboard** button to the native flyout and tray menu. it opens one
+  resizable desktop window with provider quota meters, reset times, API account
+  spending and clear cached/unavailable states.
+- expanded local Claude Code/Codex history with 24-hour and 14-day activity,
+  input/output/cache token breakdowns, and up to 20 models and projects from the
+  last 7 days. local history remains available while a client is signed out.
+- added coverage notes for pending logs, skipped compressed Codex archives,
+  estimated model prices and messages without a known price.
+- kept the existing Windows typography, theme and control styles. the dashboard
+  stays open on focus changes, preserves scroll position during updates, and
+  returns to one column in a narrower window.
+- the dashboard reads the tray's normalized local model; it adds no network
+  collector, credentials or telemetry. API billing remains separate from local
+  API-price estimates and subscription limits.
+
 ## 0.3.0 - 2026-10-25
 
 - added Claude API setup to the native flyout, with hidden key entry and Windows

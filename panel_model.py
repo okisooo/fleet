@@ -20,7 +20,7 @@ from pathlib import Path
 
 import fleet
 
-SCHEMA = 3
+SCHEMA = 4
 
 
 def _assets_dir():
@@ -337,9 +337,11 @@ def _spend(pid, metrics, usage):
         "month": snap.get("month"),
         "rate": snap.get("rate"),
         "hourly": list(snap.get("hourly") or []),
-        "models": list(snap.get("models") or [])[:3],
-        "projects": _projects(snap.get("projects"))[:3],
+        "daily": list(snap.get("daily") or [])[-14:],
+        "models": list(snap.get("models") or [])[:20],
+        "projects": _projects(snap.get("projects"))[:20],
         "estimated": bool(snap.get("estimated")),
+        "unpriced": snap.get("unpriced") or 0,
     }
 
 
@@ -511,6 +513,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
         inert = [metric for metric in metrics if _inert(metric)]
         shown = [metric for metric in metrics if not _inert(metric) and not _zero_money(metric)]
         if shown and agent.get("configured") is not False:
+            all_shown = shown
             if agent.get("compact") and name != "Antigravity":
                 scored = [metric for metric in shown if metric.get("pct") is not None]
                 shown = [max(scored, key=lambda m: m["pct"])] if scored else shown[:1]
@@ -531,6 +534,11 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
             rows = [row for group in groups for row in group["rows"]]
             rings = _rings(name, groups)
             balance = None if rings else _balance(rows)
+            all_groups = groups if all_shown is shown else _groups(name, all_shown)
+            if all_groups is not groups:
+                for group in all_groups:
+                    for row in group["rows"]:
+                        row.update(_pace(row, now))
             providers.append({
                 "id": pid,
                 "name": name,
@@ -540,6 +548,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                 "freshness": fresh,
                 "detail": "" if agent.get("err") == SOFT_CACHE else str(agent.get("err") or ""),
                 "groups": groups,
+                "all_groups": all_groups,
                 "kind": "rings" if rings else "balance" if balance else "rows",
                 "rings": [{"label": _short(r["label"]), "pct": r["pct"], "reset_at": r["reset_at"],
                            "window": r["window"], "elapsed": r["elapsed"], "state": r["state"]} for r in rings],
@@ -567,6 +576,15 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
         "providers": providers,
         "inactive": inactive,
         "known": known,
+        # Local history remains useful when a client is signed out. Never put
+        # credentials or raw account payloads into this read-only dashboard data.
+        "history": [{"id": pid, "name": "Claude Code" if pid == "claude" else "Codex",
+                     "icon": _icon(pid), "mark": _mark(pid), "spend": spend}
+                    for pid in LEDGER if pid not in hidden
+                    for spend in [_spend(pid, [], usage) if cost_on else None] if spend],
+        "coverage": {key: (usage.get("coverage") or {}).get(key)
+                     for key in ("files", "pending_files", "skipped_zst", "updated", "since")}
+                    if cost_on and usage else None,
         "api_accounts": [{"id": item["id"], "source": item.get("source", ""), "enabled": item.get("enabled") is not False}
                          for item in (accounts or []) if item.get("id") in ("anthropic", "anthropic-admin")
                          and item.get("source", "") in ("", "windows", "environment")],

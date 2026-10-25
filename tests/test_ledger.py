@@ -93,6 +93,13 @@ class LedgerCase(unittest.TestCase):
 
 
 class ClaudeLogTests(LedgerCase):
+    def test_dashboard_has_more_than_three_projects_and_model_token_counts(self):
+        self.write(self.session(), [claude("dashboard-" + str(i), NOW - 300,
+                   output=100 + i, cwd="C:\\work\\project-" + str(i)) for i in range(8)])
+        provider = self.snap()["claude"]
+        self.assertEqual(len(provider["projects"]), 8)
+        self.assertEqual(provider["models"][0]["tokens"], sum(100 + i for i in range(8)))
+
     def test_a_message_logged_in_two_files_counts_once(self):
         self.write(self.session("C--work-alpha/one.jsonl"), [claude("m1", NOW - 600, fresh=10, output=100)])
         self.write(self.session("C--work-alpha/two.jsonl"), [claude("m1", NOW - 600, fresh=10, output=100),

@@ -13,6 +13,12 @@ response.
 
 ## quick start
 
+the native **Dashboard** button opens a larger view of the same provider readings.
+it keeps cached and unavailable states visible and expands every reported limit,
+including rows condensed in the tray flyout. local activity charts, model/project
+breakdowns and token counts come only from Claude Code and Codex logs; they are
+API-price estimates. organization spending and promotional credits remain separate.
+
 Set the variable for a provider you use, then choose **Refresh now** in Fleet:
 
 ```powershell

@@ -4,32 +4,53 @@
 </picture></a></p>
 
 <p align="center">
-  <strong>ai usage and quota tracker for Windows 11</strong> · v0.3.0 · MIT<br>
-  <a href="https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-Setup-0.3.0.exe">Windows installer</a> · <a href="https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-0.3.0-portable.zip">portable ZIP</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a>
+  <strong>ai usage and quota tracker for Windows 11</strong> · v0.4.0 · MIT<br>
+  <a href="https://github.com/okisooo/fleet/releases/download/v0.4.0/Fleet-Setup-0.4.0.exe">Windows installer</a> · <a href="https://github.com/okisooo/fleet/releases/download/v0.4.0/Fleet-0.4.0-portable.zip">portable ZIP</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a>
 </p>
 
 track Claude Code, OpenAI Codex, Grok CLI, Google Antigravity, and API providers
 without opening each service. a tray meter tracks quota pressure; the native flyout
 brings limits, reset times, pace, balances, and what your tokens would cost at API
-prices together. readings are marked **live, cached, or unavailable**, so an
+prices together. choose **Dashboard** for a larger, resizable window that stays
+open while you work. readings are marked **live, cached, or unavailable**, so an
 older result stays visibly older.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
-    <img src="docs/screenshot.png" width="400" alt="Fleet native dashboard with quota meters, API-price estimates and Claude API spending">
+    <img src="docs/screenshot.png" width="400" alt="Fleet flyout with Dashboard button, quota meters, API-price estimates and Claude API spending">
   </picture>
-  <br><sub>v0.3.0 native flyout; sample data. readings depend on your connected accounts.</sub>
+  <br><sub>v0.4.0 native flyout; sample data. readings depend on your connected accounts.</sub>
 </p>
+
+## dashboard
+
+click **Dashboard** at the top of the flyout, or right-click the tray icon and
+choose **Dashboard**. the native window shows all reported provider limits,
+reset times, API balances/spend, and local Claude Code/Codex usage in one place.
+resize it for one or two columns; **Refresh** and **Settings** stay at the top.
+
+local history includes 24-hour and 14-day activity, token/cache breakdowns for
+today, 7 and 30 days, and up to 20 models and projects from the last 7 days.
+only Claude Code and Codex supply this local history. these are API-price
+estimates, separate from subscription limits and actual API account spending.
+coverage notes flag compressed Codex archives that have not been indexed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
+  <img src="docs/dashboard.png" width="900" alt="Fleet desktop dashboard with usage history, token totals and provider quota meters">
+</picture>
+
+*sample data rendered from the native dashboard; no personal account or project data.*
 
 ## download
 
-| v0.3.0 · Python included | getting started |
+| v0.4.0 · Python included | getting started |
 | --- | --- |
-| **[Windows installer](https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-Setup-0.3.0.exe)** | per-user install; no administrator prompt; optional start at sign-in |
-| **[portable ZIP](https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-0.3.0-portable.zip)** | extract and run `Fleet.exe` |
+| **[Windows installer](https://github.com/okisooo/fleet/releases/download/v0.4.0/Fleet-Setup-0.4.0.exe)** | per-user install; no administrator prompt; optional start at sign-in |
+| **[portable ZIP](https://github.com/okisooo/fleet/releases/download/v0.4.0/Fleet-0.4.0-portable.zip)** | extract and run `Fleet.exe` |
 
-[release notes and SHA-256 checksums](https://github.com/okisooo/fleet/releases/tag/v0.3.0)
+[release notes and SHA-256 checksums](https://github.com/okisooo/fleet/releases/tag/v0.4.0)
 · [latest release](https://github.com/okisooo/fleet/releases/latest)
 
 > [!WARNING]
