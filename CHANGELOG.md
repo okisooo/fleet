@@ -26,6 +26,8 @@
 - bundled the native panel and linked documentation in portable/installable
   packages. CI now builds the native panel; release builds include checksums and
   create drafts for verification before publication.
+- the installer's start-at-sign-in option now defaults to enabled; it can be
+  unchecked during setup. no separate recovery watchdog is installed.
 
 ## 0.2.0 - 2026-08-07
 

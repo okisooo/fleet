@@ -124,7 +124,8 @@ Enable one in `providers.json`:
 ```
 
 Each poll sends one `max_tokens: 1` request — a fraction of a cent at current
-prices. Automatic polling is paced per provider; Claude API checks use five minutes. `model` overrides the model
+prices. Automatic polling is paced per provider; Claude API checks use five minutes.
+`model` overrides the model
 Fleet asks for; use it when the default has been retired on your account.
 
 ## config file

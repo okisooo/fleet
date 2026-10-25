@@ -128,9 +128,11 @@ diagnostics without opening the flyout:
 ```
 
 `--providers` lists API-key configuration; `--dry` polls and prints readings.
-the Python launcher uses the compatibility flyout unless `FleetPanel.exe` is
-beside it. build the native dashboard and key setup with the release script;
-see [building from source](CONTRIBUTING.md#building-a-release-locally).
+for the native dashboard and key setup, install a .NET SDK and run
+`dotnet build native\FleetPanel\FleetPanel.csproj -c Release` before launching
+from source. without that build the Python launcher uses the compatibility
+flyout. the release script builds the packaged copy; see
+[building from source](CONTRIBUTING.md#building-a-release-locally).
 see [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## more from OKISO
