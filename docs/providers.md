@@ -13,7 +13,7 @@ response.
 
 ## quick start
 
-the native **Dashboard** button opens a larger view of the same provider readings.
+the native **Dashboard** button selects a detail page in the existing flyout.
 it keeps cached and unavailable states visible and expands every reported limit,
 including rows condensed in the tray flyout. local activity charts, model/project
 breakdowns and token counts come only from Claude Code and Codex logs; they are

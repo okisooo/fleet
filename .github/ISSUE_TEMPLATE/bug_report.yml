@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Fleet version
-      placeholder: 0.4.0 installer, portable ZIP, or a source checkout commit
+      placeholder: 0.4.1 installer, portable ZIP, or a source checkout commit
     validations:
       required: true
   - type: input
