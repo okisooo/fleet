@@ -59,6 +59,23 @@ class NativePanelTests(unittest.TestCase):
 
 
 class InstantClickTests(unittest.TestCase):
+    def test_dashboard_menu_uses_its_own_native_message(self):
+        host = mock.Mock(pid=777, poll=mock.Mock(return_value=None))
+        with mock.patch.object(tray, "_PANEL_PROCESS", host), mock.patch.object(
+            tray, "_allow_panel_foreground"
+        ), mock.patch.object(tray, "_post_panel", return_value=True) as post:
+            tray.open_panel(mock.Mock(_hwnd=99), page="dashboard")
+        self.assertEqual(post.call_args.args[:2], (tray.WM_FLEET_DASHBOARD, 99))
+
+    def test_a_cold_dashboard_launch_leaves_a_request_for_the_native_host(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(tray, "CACHE", Path(temp)), mock.patch.object(
+                tray, "_PANEL_PROCESS", None
+            ), mock.patch.object(tray, "ensure_panel_host") as ensure:
+                tray.open_panel(page="dashboard")
+                self.assertTrue((Path(temp) / "dashboard.show").is_file())
+            ensure.assert_called_once_with()
+
     def _host(self, temp, hwnd=4242, pid=777):
         heartbeat = Path(temp) / "panel-heartbeat.json"
         heartbeat.write_text(json.dumps({"pid": pid, "hwnd": hwnd, "ts": time.time()}))

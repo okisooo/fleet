@@ -48,6 +48,7 @@ _WM_HEARTBEAT = 0x8001
 WM_FLEET_TOGGLE = 0x8000 + 0x46
 WM_FLEET_DATA = 0x8000 + 0x47
 WM_FLEET_SETTINGS = 0x8000 + 0x48
+WM_FLEET_DASHBOARD = 0x8000 + 0x49
 _LAST_POLL = time.time()
 _UI_ACK = {"ts": 0.0, "registered": False}
 _FAULT_FILE = None
@@ -501,10 +502,14 @@ def open_panel(icon=None, page=None):
     if process is not None and process.poll() is None:
         tray = int(getattr(icon, "_hwnd", 0) or 0)
         _allow_panel_foreground(process.pid)
-        message = WM_FLEET_SETTINGS if page == "settings" else WM_FLEET_TOGGLE
+        message = WM_FLEET_DASHBOARD if page == "dashboard" else WM_FLEET_SETTINGS if page == "settings" else WM_FLEET_TOGGLE
         if _post_panel(message, tray, ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF):
             return
-    ensure_panel_host(show=True, icon=icon)
+    if page == "dashboard":
+        ensure_panel_host()
+        (CACHE / "dashboard.show").write_text(str(time.time_ns()))
+    else:
+        ensure_panel_host(show=True, icon=icon)
 
 
 def run_panel_host():
@@ -672,6 +677,8 @@ def build_menu():
     import pystray
     return pystray.Menu(
         pystray.MenuItem("Open Fleet", lambda i, it: open_panel(i), default=True),
+        pystray.MenuItem("Dashboard", lambda i, it: open_panel(i, page="dashboard"),
+                         visible=lambda it: _native_panel() is not None),
         pystray.MenuItem("Refresh now", lambda i, it: threading.Thread(target=refresh, args=(i,), daemon=True).start()),
         pystray.MenuItem("Mute alerts for today", lambda i, it: _toggle_mute(),
                          checked=lambda it: prefs.muted(prefs.load())),

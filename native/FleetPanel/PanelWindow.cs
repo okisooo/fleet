@@ -32,6 +32,7 @@ namespace FleetPanel
         private const int WM_FLEET_DATA = 0x8000 + 0x47;
         // WM_APP + 0x48 opens straight onto the settings page (tray menu: Settings).
         private const int WM_FLEET_SETTINGS = 0x8000 + 0x48;
+        private const int WM_FLEET_DASHBOARD = 0x8000 + 0x49;
         private const double EdgeGap = 12;   // DIP between the card and the taskbar edge
         private const int Away = -32000;     // where the closed flyout waits
 
@@ -45,6 +46,8 @@ namespace FleetPanel
         // Click-away watching only runs while the flyout is open.
         private readonly DispatcherTimer clickTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(16) };
         private PanelView view;
+        private DashboardWindow dashboard;
+        private PanelData currentData = new PanelData();
         private bool light;
         private IntPtr hwnd;
         private bool liveCapture;
@@ -135,6 +138,7 @@ namespace FleetPanel
         {
             view = new PanelView(Theme.Create(light));
             view.RefreshClicked += RequestRefresh;
+            view.DashboardRequested += OpenDashboard;
             view.ActionClicked += action =>
             {
                 if (action == "claude-sign-in") SignIn();
@@ -246,6 +250,12 @@ namespace FleetPanel
                 }
                 return (IntPtr)1;
             }
+            if (message == WM_FLEET_DASHBOARD)
+            {
+                handled = true;
+                OpenDashboard();
+                return (IntPtr)1;
+            }
             return IntPtr.Zero;
         }
 
@@ -267,6 +277,11 @@ namespace FleetPanel
                 Application.Current.Shutdown();
                 return;
             }
+            if (File.Exists(PathOf("dashboard.show")))
+            {
+                try { File.Delete(PathOf("dashboard.show")); } catch (IOException) { }
+                OpenDashboard();
+            }
             var seen = Mtime("panel.show");
             if (seen > signalSeen && seen != DateTime.MinValue)
             {
@@ -280,7 +295,7 @@ namespace FleetPanel
             {
                 WriteHeartbeat();
             }
-            if (open && !closing && (now - lastVisibleTouch).TotalSeconds >= 2)
+            if (((open && !closing) || (dashboard != null && dashboard.IsVisible && dashboard.WindowState != WindowState.Minimized)) && (now - lastVisibleTouch).TotalSeconds >= 2)
             {
                 Touch("panel.visible");
                 lastVisibleTouch = now;
@@ -299,6 +314,7 @@ namespace FleetPanel
                 {
                     light = !light;
                     BuildView();
+                    dashboard?.ChangeTheme(light);
                 }
             }
         }
@@ -339,7 +355,9 @@ namespace FleetPanel
             {
                 var data = PanelData.Load(PathOf("panel.json"));
                 modelSeen = stamp;
+                currentData = data;
                 view.Show(data, animate: open);
+                dashboard?.Update(data);
                 // Lay out now, while nobody is waiting, so an open never has to.
                 UpdateLayout();
                 if (!open)
@@ -432,6 +450,36 @@ namespace FleetPanel
         }
 
         private void RequestRefresh() => Touch("refresh.request");
+
+        private void OpenDashboard()
+        {
+            LoadModel();
+            if (dashboard == null)
+            {
+                dashboard = new DashboardWindow(currentData, light);
+                dashboard.RefreshRequested += RequestRefresh;
+                dashboard.SettingsRequested += DashboardSettings;
+                dashboard.ActionRequested += action =>
+                {
+                    if (action == "api-settings") DashboardSettings();
+                    else if (action == "claude-sign-in") SignIn();
+                    else if (action == "grok-renew") RenewGrok();
+                    else if (action == "anthropic-billing") OpenBilling();
+                };
+                dashboard.Closed += (s, e) => dashboard = null;
+            }
+            if (open) Close(animate: false);
+            dashboard.Show();
+            if (dashboard.WindowState == WindowState.Minimized) dashboard.WindowState = WindowState.Normal;
+            if (Environment.GetEnvironmentVariable("FLEET_PANEL_OFFSCREEN") != "1") dashboard.Activate();
+        }
+
+        private void DashboardSettings()
+        {
+            view.ShowSettings();
+            UpdateLayout();
+            if (!open || closing) Toggle();
+        }
 
         private void OpenBilling()
         {

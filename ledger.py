@@ -635,7 +635,7 @@ class Ledger:
             week_cost = block["week"][0]
             models = sorted(((cost, tokens, model) for model, (cost, tokens) in block["models"].items() if tokens),
                             reverse=True)
-            projects = sorted(block["projects"].items(), key=lambda item: item[1], reverse=True)[:3]
+            projects = sorted(block["projects"].items(), key=lambda item: item[1], reverse=True)[:20]
             out[provider] = {
                 "today": _totals(block["today"]),
                 "week": _totals(block["week"]),
@@ -646,7 +646,8 @@ class Ledger:
                 "daily": [{"day": day.date().isoformat(), "cost": round(cost, 4), "tokens": tokens}
                           for day, (cost, tokens) in zip(days, block["daily"])],
                 "models": [{"id": model, "name": pricing.label(model), "cost": round(cost, 4),
-                            "share": round(cost / week_cost, 4) if week_cost else 0.0}
+                            "share": round(cost / week_cost, 4) if week_cost else 0.0,
+                            "tokens": tokens}
                            for cost, tokens, model in models],
                 "projects": [{"name": name, "cost": round(cost, 4)} for name, cost in projects],
                 "estimated": block["estimated"],

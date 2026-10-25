@@ -21,6 +21,8 @@ namespace FleetPanel
         public string Units = "used", TrayIcon = "bars";
         public bool Alerts = true, Cost = true;
         public Summary Summary;
+        public List<Provider> History = new List<Provider>();
+        public double? LogFiles, PendingFiles, SkippedArchives, LogUpdated, LogSince;
 
         public static PanelData Load(string path)
         {
@@ -102,6 +104,12 @@ namespace FleetPanel
                 {
                     p.Meters.Add(ParseRow(r));
                 }
+                foreach (var g in List(item, "all_groups"))
+                {
+                    var group = new Group { Title = Str(g, "title") };
+                    foreach (var r in List(g, "rows")) group.Rows.Add(ParseRow(r));
+                    p.AllGroups.Add(group);
+                }
                 if (item.TryGetValue("spend", out var sp) && sp is Dictionary<string, object> spend)
                 {
                     p.Spend = ParseSpend(spend);
@@ -129,6 +137,18 @@ namespace FleetPanel
                 data.ApiAccounts[Str(item, "id")] = Str(item, "source");
                 if (item.TryGetValue("enabled", out var en) && en is bool enabled && !enabled)
                     data.DisabledApiAccounts.Add(Str(item, "id"));
+            }
+            foreach (var item in List(root, "history"))
+            {
+                if (item.TryGetValue("spend", out var sp) && sp is Dictionary<string, object> spend)
+                    data.History.Add(new Provider { Id = Str(item, "id"), Name = Str(item, "name"),
+                        Icon = Str(item, "icon"), Mark = Str(item, "mark"), Spend = ParseSpend(spend) });
+            }
+            if (root.TryGetValue("coverage", out var cv) && cv is Dictionary<string, object> coverage)
+            {
+                data.LogFiles = Num(coverage, "files"); data.PendingFiles = Num(coverage, "pending_files");
+                data.SkippedArchives = Num(coverage, "skipped_zst"); data.LogUpdated = Num(coverage, "updated");
+                data.LogSince = Num(coverage, "since");
             }
             return data;
         }
@@ -164,12 +184,15 @@ namespace FleetPanel
             }
             foreach (var m in List(map, "models"))
             {
-                spend.Models.Add(new Share { Name = Str(m, "name"), Cost = Num(m, "cost") ?? 0, Part = Num(m, "share") ?? 0 });
+                spend.Models.Add(new Share { Name = Str(m, "name"), Cost = Num(m, "cost") ?? 0, Part = Num(m, "share") ?? 0, Tokens = Num(m, "tokens") ?? 0 });
             }
             foreach (var m in List(map, "projects"))
             {
                 spend.Projects.Add(new Share { Name = Str(m, "name"), Cost = Num(m, "cost") ?? 0, Part = Num(m, "share") ?? 0 });
             }
+            foreach (var day in List(map, "daily"))
+                spend.Daily.Add(new Day { Label = Str(day, "day"), Cost = Num(day, "cost") ?? 0, Tokens = Num(day, "tokens") ?? 0 });
+            spend.Unpriced = Num(map, "unpriced") ?? 0;
             return spend;
         }
 
@@ -235,6 +258,7 @@ namespace FleetPanel
         public Balance Balance;
         public List<Ring> Rings = new List<Ring>();
         public List<Group> Groups = new List<Group>();
+        public List<Group> AllGroups = new List<Group>();
         /// <summary>The limits shown while the section is closed; every row is also in Groups.</summary>
         public List<Row> Meters = new List<Row>();
         public Spend Spend;
@@ -247,7 +271,9 @@ namespace FleetPanel
         public string WindowLabel = "";
         public double? CostPerHour, TokensPerMin;
         public bool Estimated;
+        public double Unpriced;
         public List<double> Hourly = new List<double>();
+        public List<Day> Daily = new List<Day>();
         public List<Share> Models = new List<Share>();
         public List<Share> Projects = new List<Share>();
     }
@@ -260,7 +286,13 @@ namespace FleetPanel
     internal sealed class Share
     {
         public string Name = "";
-        public double Cost, Part;
+        public double Cost, Part, Tokens;
+    }
+
+    internal sealed class Day
+    {
+        public string Label = "";
+        public double Cost, Tokens;
     }
 
     internal sealed class Summary

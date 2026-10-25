@@ -32,7 +32,7 @@ namespace FleetPanel
     /// and a section opens by revealing its height, so frames stay cheap at any
     /// refresh rate.
     /// </summary>
-    internal sealed class PanelView
+    internal sealed partial class PanelView
     {
         public const double CardWidth = 380;
         // Room for the whole shadow: one that runs past the window edge is cut off
@@ -80,6 +80,7 @@ namespace FleetPanel
         private EventHandler counting;
 
         public event Action RefreshClicked;
+        public event Action DashboardRequested;
         /// <summary>Raised once the open animation settles, with its measured frame pacing.</summary>
         public event Action<string> IntroMeasured;
         /// <summary>A fix the user asked for: "claude-sign-in", "grok-renew".</summary>
@@ -434,6 +435,9 @@ namespace FleetPanel
             if (!back)
             {
                 var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                var dashboard = Button("Dashboard", "Open the full usage dashboard", () => DashboardRequested?.Invoke());
+                dashboard.Margin = new Thickness(0, 0, 8, 0);
+                actions.Children.Add(dashboard);
                 var refresh = IconButton("", "Refresh usage now", () => { Spin(); RefreshClicked?.Invoke(); });
                 ((TextBlock)refresh.Child).RenderTransformOrigin = new Point(0.5, 0.5);
                 ((TextBlock)refresh.Child).RenderTransform = spin;

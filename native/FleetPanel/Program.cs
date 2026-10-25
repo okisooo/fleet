@@ -99,6 +99,20 @@ namespace FleetPanel
         /// <summary>page: "usage", "settings", or "detail:&lt;provider id&gt;".</summary>
         private static int Render(string model, string backdropPath, string output, bool light, double scale, string page)
         {
+            if (page == "dashboard" || page == "dashboard-narrow")
+            {
+                var width = page == "dashboard-narrow" ? 760.0 : 1120.0;
+                var dashboardRoot = DashboardWindow.Preview(PanelData.Load(model), light, width);
+                dashboardRoot.Measure(new Size(width, 900));
+                dashboardRoot.Arrange(new Rect(0, 0, width, 900));
+                dashboardRoot.UpdateLayout();
+                var dashboardBitmap = new RenderTargetBitmap((int)(width * scale), (int)(900 * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+                dashboardBitmap.Render(dashboardRoot);
+                var dashboardEncoder = new PngBitmapEncoder();
+                dashboardEncoder.Frames.Add(BitmapFrame.Create(dashboardBitmap));
+                using (var stream = File.Create(output)) dashboardEncoder.Save(stream);
+                return 0;
+            }
             var view = new PanelView(Theme.Create(light));
             view.Show(PanelData.Load(model));
             if (page == "settings") view.ShowSettings();

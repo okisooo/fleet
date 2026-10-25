@@ -53,19 +53,19 @@ Rules for a new built-in:
 ## building a release locally
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.3.0
+.\scripts\build-release.ps1 -Version 0.4.0
 ```
 
 This requires a .NET SDK as well as Python. It creates an isolated build
 environment under the scratch directory, builds `dist\Fleet\Fleet.exe` and
-`FleetPanel.exe`, and writes `dist\Fleet-0.3.0-portable.zip`. The whole `Fleet`
+`FleetPanel.exe`, and writes `dist\Fleet-0.4.0-portable.zip`. The whole `Fleet`
 directory is required. Use `-ScratchRoot` and `-OutputRoot` to choose physical
 storage; `-BuildVenv` can select an existing build environment.
 
 Building the installer additionally needs Inno Setup 6:
 
 ```powershell
-$env:FLEET_VERSION = "0.3.0"
+$env:FLEET_VERSION = "0.4.0"
 $env:FLEET_APP_ICON = "<scratch directory>\assets\fleet.ico"
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Fleet.iss
 ```

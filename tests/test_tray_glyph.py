@@ -152,7 +152,7 @@ class TrayApplyTests(unittest.TestCase):
     def test_the_menu_offers_settings_and_a_mute(self):
         labels = [item.text for item in tray.build_menu().items if hasattr(item, "text")]
 
-        self.assertEqual(labels[:4], ["Open Fleet", "Refresh now", "Mute alerts for today", "Settings"])
+        self.assertEqual(labels[:5], ["Open Fleet", "Dashboard", "Refresh now", "Mute alerts for today", "Settings"])
 
 
 class AlertTests(unittest.TestCase):
