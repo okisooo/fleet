@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest import mock
 
 import apikeys
 import fleet
+import panel_model
 import panel_wpf
 import tray
 
@@ -185,26 +187,484 @@ class ProviderCacheTests(unittest.TestCase):
         self.assertEqual(result["cached_at"], 123.0)
 
 
-class ClaudeUsageTests(unittest.TestCase):
-    def test_unified_headers_become_session_and_weekly_metrics(self):
-        metrics = fleet._claude_metrics_from_headers(
-            {
-                "Anthropic-Ratelimit-Unified-5H-Utilization": "0.42",
-                "anthropic-ratelimit-unified-5h-reset": "2000",
-                "anthropic-ratelimit-unified-7d-utilization": "0.71",
-                "anthropic-ratelimit-unified-7d-reset": "3000",
-            }
-        )
+class ProviderConnectionTests(unittest.TestCase):
+    def test_missing_claude_credentials_are_not_an_error_state(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            fleet, "HOME", Path(temp)
+        ), mock.patch.object(fleet, "APPDATA", Path(temp)):
+            result = fleet.api_claude()
 
+        self.assertFalse(result["configured"])
+        self.assertFalse(result["known"])
+        self.assertIn("credentials", result["err"])
+
+    def test_seen_claude_install_without_a_token_stays_discoverable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            credentials = Path(temp) / ".claude" / ".credentials.json"
+            credentials.parent.mkdir()
+            credentials.write_text(json.dumps({"claudeAiOauth": {"subscriptionType": "pro"}}))
+            with mock.patch.object(fleet, "HOME", Path(temp)), mock.patch.object(
+                fleet, "APPDATA", Path(temp)
+            ):
+                result = fleet.api_claude()
+
+        self.assertFalse(result["configured"])
+        self.assertTrue(result["known"])
+        # The panel turns exactly this state into a one-click sign-in.
+        self.assertEqual(result["err"], fleet.CLAUDE_SIGNED_OUT)
+
+    def test_a_desktop_app_session_keeps_claude_live_without_cli_credentials(self):
+        """Signing in through the app alone leaves claudeAiOauth empty."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            credentials = root / ".claude" / ".credentials.json"
+            credentials.parent.mkdir()
+            credentials.write_text(
+                json.dumps(
+                    {
+                        "claudeAiOauth": {
+                            "subscriptionType": "pro",
+                            "accessToken": "",
+                            "refreshToken": "",
+                            "expiresAt": 0,
+                        }
+                    }
+                )
+            )
+            history = root / "Claude" / "plan-usage-history.json"
+            history.parent.mkdir()
+            history.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "samples": [
+                            {"t": (time.time() - 3600) * 1000, "u": {"fh": 4, "sd": 9}},
+                            {"t": (time.time() - 300) * 1000, "u": {"fh": 12, "sd": 15}},
+                        ],
+                    }
+                )
+            )
+            with mock.patch.object(fleet, "HOME", root), mock.patch.object(
+                fleet, "APPDATA", root
+            ), mock.patch.object(fleet, "_jget") as request:
+                result = fleet.api_claude()
+
+        request.assert_not_called()
+        self.assertNotIn("configured", result)
+        self.assertEqual(result["plan"], "pro")
+        self.assertEqual(result["source"], "desktop")
         self.assertEqual(
-            metrics,
-            [
-                fleet.M("Session", 42.0, 2000.0),
-                fleet.M("Weekly", 71.0, 3000.0),
-            ],
+            result["metrics"], [fleet.M("Session", 12), fleet.M("Weekly", 15)]
         )
 
-    def test_messages_headers_rescue_a_throttled_usage_endpoint(self):
+    def test_a_stale_desktop_sample_is_not_passed_off_as_a_reading(self):
+        with tempfile.TemporaryDirectory() as temp:
+            history = Path(temp) / "history.json"
+            history.write_text(
+                json.dumps(
+                    {"samples": [{"t": (time.time() - 86400) * 1000, "u": {"fh": 12}}]}
+                )
+            )
+            self.assertIsNone(fleet._claude_desktop_metrics(history))
+
+    def test_desktop_samples_without_usage_are_skipped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            history = Path(temp) / "history.json"
+            now = time.time() * 1000
+            history.write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {"t": now - 600_000, "u": {"fh": 7, "sd": 8}},
+                            {"t": now, "u": {}},
+                        ]
+                    }
+                )
+            )
+            metrics, ts = fleet._claude_desktop_metrics(history)
+
+        self.assertEqual(metrics, [fleet.M("Session", 7), fleet.M("Weekly", 8)])
+        self.assertLess(time.time() - ts, 1200)
+
+    def test_missing_codex_credentials_are_not_an_error_state(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            fleet, "HOME", Path(temp)
+        ), mock.patch.dict(fleet.os.environ, {"CODEX_HOME": str(Path(temp) / "codex")}, clear=False):
+            result = fleet.api_codex()
+
+        self.assertFalse(result["configured"])
+        self.assertFalse(result["known"])
+        self.assertIn("credentials", result["err"])
+
+    def test_an_installed_but_signed_out_grok_stays_listed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / ".grok").mkdir()
+            with mock.patch.object(fleet, "HOME", Path(temp)), mock.patch.object(
+                fleet, "_load_last", return_value=None
+            ):
+                result = fleet.api_grok()
+
+        self.assertTrue(result["known"])
+        self.assertIn("signed out", result["err"])
+        model = panel_model.build([result], time.time())
+        self.assertEqual([(i["name"], i["label"]) for i in model["inactive"]], [("Grok", "Signed out")])
+
+    def test_missing_grok_credentials_are_not_an_error_state(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            fleet, "HOME", Path(temp)
+        ), mock.patch.object(
+            fleet, "_load_last", return_value=None
+        ):
+            result = fleet.api_grok()
+
+        self.assertFalse(result["configured"])
+        self.assertFalse(result["known"])
+        self.assertIn("credentials", result["err"])
+
+
+class GrokAuthOwnershipTests(unittest.TestCase):
+    def test_usage_poll_never_refreshes_or_rewrites_grok_cli_credentials(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_file = root / ".grok" / "auth.json"
+            auth_file.parent.mkdir()
+            original = json.dumps(
+                {
+                    "https://auth.x.ai::account": {
+                        "key": "cli-access",
+                        "refresh_token": "cli-refresh",
+                        "oidc_client_id": "cli-client",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                    }
+                },
+                indent=2,
+            ).encode()
+            auth_file.write_bytes(original)
+
+            def grok_api(url, token, *_args, **_kwargs):
+                if "billing?format=credits" in url and token == "cli-access":
+                    return 401, {}, {}
+                return 200, {}, {"config": {}}
+
+            refreshed = json.dumps(
+                {"access_token": "fleet-refreshed", "expires_in": 3600}
+            ).encode()
+            with mock.patch.object(fleet, "HOME", root), mock.patch.object(
+                fleet, "_load_last", return_value=None
+            ), mock.patch.object(fleet, "_jget", side_effect=grok_api), mock.patch.object(
+                fleet, "_http", return_value=(200, {}, refreshed)
+            ) as oauth_refresh:
+                result = fleet.api_grok()
+
+            self.assertEqual(auth_file.read_bytes(), original)
+            oauth_refresh.assert_not_called()
+            self.assertIn("expired", result["err"])
+
+    def test_an_expired_login_is_read_from_the_file_without_a_request(self):
+        """auth.json states its own expiry; a doomed 401 round trip proves nothing."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            auth_file = root / ".grok" / "auth.json"
+            auth_file.parent.mkdir()
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "https://auth.x.ai::account": {
+                            "key": "cli-access",
+                            "refresh_token": "cli-refresh",
+                            "expires_at": "2026-08-16T00:00:00Z",
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(fleet, "HOME", root), mock.patch.object(
+                fleet, "_load_last", return_value=None
+            ), mock.patch.object(fleet, "_jget") as request:
+                result = fleet.api_grok()
+
+            request.assert_not_called()
+            self.assertIn("expired", result["err"])
+            self.assertIn("run grok", result["err"])
+
+
+class AntigravitySummaryTests(unittest.TestCase):
+    """Quota groups come from Antigravity's own summary, whatever it lists."""
+
+    SUMMARY = {"response": {"groups": [
+        {"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.99, "resetTime": "2026-10-29T09:49:51Z"},
+            {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.8, "resetTime": "2026-10-22T22:24:56Z"}]},
+        {"displayName": "Claude and GPT models", "buckets": [
+            {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 1, "resetTime": "2026-10-29T17:33:14Z"},
+            {"bucketId": "3p-5h", "window": "5h", "resetTime": "2026-10-22T22:33:14Z"},
+            {"bucketId": "3p-daily", "window": "daily", "remainingFraction": 0.5, "disabled": True}]},
+        {"displayName": "Gemini 4 Argon", "buckets": [
+            {"bucketId": "gemini-argon-wtu-weekly", "window": "weekly", "remainingFraction": 0.75,
+             "resetTime": "2026-10-29T17:23:54Z"}]}]}}
+
+    def test_every_group_and_window_is_kept_under_antigravity_names(self):
+        metrics = fleet._agy_parse_summary(self.SUMMARY)
+
+        self.assertEqual([(m["group"], m["window"], round(m["pct"])) for m in metrics],
+                         [("Gemini", "weekly", 1), ("Gemini", "5h", 20), ("Claude & GPT", "weekly", 0),
+                          ("Gemini 4 Argon", "weekly", 25)])
+        # Labels stay what older readings used, so cached data and T3 keep working.
+        self.assertEqual([m["label"] for m in metrics][:3], ["Weekly", "Session", "Claude Wk"])
+
+    def test_the_flyout_groups_rows_the_way_antigravity_does(self):
+        metrics = fleet._agy_parse_summary(self.SUMMARY)
+        model = panel_model.build([{"agent": "Antigrav", "err": "", "metrics": metrics}], 1000.0, now=1000.0)
+
+        groups = model["providers"][0]["groups"]
+        self.assertEqual([(g["title"], [row["label"] for row in g["rows"]]) for g in groups],
+                         [("Gemini", ["Weekly limit", "5-hour limit"]), ("Claude & GPT", ["Weekly limit"]),
+                          ("Gemini 4 Argon", ["Weekly limit"])])
+        self.assertEqual([m["short"] for m in model["providers"][0]["meters"]], ["Gemini", "Claude & GPT", "Gemini 4 Argon"])
+
+    def test_the_cloud_is_asked_as_the_installed_antigravity_version(self):
+        fleet._agy_user_agent.cache_clear()
+        try:
+            with tempfile.TemporaryDirectory() as temp, mock.patch.dict(fleet.os.environ, {"LOCALAPPDATA": temp}):
+                exe = Path(temp) / "Programs" / "antigravity" / "Antigravity.exe"
+                exe.parent.mkdir(parents=True)
+                exe.write_bytes(b"")
+                with mock.patch.object(fleet, "_exe_version", return_value="2.25.0"):
+                    self.assertTrue(fleet._agy_user_agent().startswith("antigravity/2.25.0 windows/amd64 Fleet"))
+                fleet._agy_user_agent.cache_clear()
+                with mock.patch.object(fleet, "_exe_version", return_value=None):
+                    self.assertIn(f"antigravity/{fleet.AGY_FALLBACK_VERSION} ", fleet._agy_user_agent())
+        finally:
+            fleet._agy_user_agent.cache_clear()
+
+
+class GrokRenewalTests(unittest.TestCase):
+    """The Grok CLI renews its own six-hour login; Fleet only asks it to run."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / ".grok" / "bin").mkdir(parents=True)
+        self.cache = self.root / "cache"
+        self.cache.mkdir()
+        self.auth = self.root / ".grok" / "auth.json"
+        self.write_login("old-access", "2026-08-16T00:00:00Z")
+        self.runs = []
+        self.patches = [
+            mock.patch.object(fleet, "HOME", self.root),
+            mock.patch.object(fleet, "CACHE", self.cache),
+            mock.patch.object(fleet, "_load_last", return_value=None),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.temp.cleanup()
+
+    def write_login(self, key, expires):
+        self.auth.write_text(json.dumps(
+            {"https://auth.x.ai::account": {"key": key, "refresh_token": "cli-refresh", "expires_at": expires}}))
+
+    def cli(self, renews=True):
+        """A Grok CLI on disk whose run renews the login (or fails to)."""
+        (self.root / ".grok" / "bin" / "grok.exe").write_bytes(b"")
+        test = self
+
+        class Run:
+            def __init__(self, args, **_kwargs):
+                test.runs.append(args)
+                if renews:
+                    test.write_login("new-access", "2099-01-01T00:00:00Z")
+
+            def wait(self, timeout=None):
+                return 0
+
+        return mock.patch.object(fleet.subprocess, "Popen", Run)
+
+    def test_an_expired_login_is_renewed_by_the_cli_and_then_read(self):
+        def grok_api(url, token, *_args, **_kwargs):
+            self.assertEqual(token, "new-access")
+            return 200, {}, {"config": {"creditUsagePercent": 12,
+                                        "currentPeriod": {"type": "WEEKLY", "end": "2099-01-01T00:00:00Z"}}}
+
+        with self.cli(), mock.patch.object(fleet, "_jget", side_effect=grok_api):
+            result = fleet.api_grok()
+
+        self.assertEqual([args[1:] for args in self.runs], [["models"]])
+        self.assertEqual(result["err"], "")
+        self.assertEqual((result["metrics"][0]["label"], result["metrics"][0]["pct"]), ("Weekly", 12))
+
+    def test_a_failed_renewal_backs_off_and_says_the_login_expired(self):
+        with self.cli(renews=False), mock.patch.object(fleet, "_jget") as request:
+            first = fleet.api_grok()
+            second = fleet.api_grok()
+
+        self.assertEqual(len(self.runs), 1)  # the second poll is inside the backoff
+        request.assert_not_called()
+        self.assertIn("run grok", first["err"])
+        self.assertIn("run grok", second["err"])
+        self.assertGreater(fleet._refresh_cooldown_left("grok_refresh"), 200)
+
+    def test_without_the_cli_beside_the_login_nothing_is_run(self):
+        with mock.patch.object(fleet.subprocess, "Popen") as popen, mock.patch.object(fleet, "_jget") as request:
+            result = fleet.api_grok()
+
+        popen.assert_not_called()
+        request.assert_not_called()
+        self.assertIn("expired", result["err"])
+
+    def test_a_live_login_is_left_alone(self):
+        self.write_login("live-access", "2099-01-01T00:00:00Z")
+        with self.cli(), mock.patch.object(fleet, "_jget", return_value=(200, {}, {"config": {}})):
+            fleet.api_grok()
+
+        self.assertEqual(self.runs, [])
+
+
+class GrokUsageTests(unittest.TestCase):
+    _AUTH = {
+        "https://auth.x.ai::account": {
+            "key": "cli-access",
+            "refresh_token": "cli-refresh",
+            "oidc_client_id": "cli-client",
+            # Far future on purpose: these cases cover live billing parsing, and
+            # a fixed near-term date silently turned them into expiry tests.
+            "expires_at": "2099-01-01T00:00:00Z",
+        }
+    }
+
+    def _grok_home(self, root):
+        auth_file = Path(root) / ".grok" / "auth.json"
+        auth_file.parent.mkdir()
+        auth_file.write_text(json.dumps(self._AUTH))
+        return Path(root)
+
+    def _api(self, credits, settings=None, billing=None):
+        settings = settings or {"subscription_tier_display": "X Premium"}
+        billing = billing or {
+            "config": {"monthlyLimit": {"val": 0}, "used": {"val": 0}, "onDemandCap": {"val": 0}}
+        }
+
+        def grok_api(url, token, *_args, **_kwargs):
+            self.assertEqual(token, "cli-access")
+            if "format=credits" in url:
+                return 200, {}, credits
+            if url.endswith("/settings"):
+                return 200, {}, settings
+            if url.endswith("/billing"):
+                return 200, {}, billing
+            raise AssertionError(url)
+
+        return grok_api
+
+    def test_unified_billing_weekly_percent_stays_live(self):
+        credits = {
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-09-06T23:49:28.623539+00:00",
+                },
+                "creditUsagePercent": 1.0,
+                "onDemandCap": {"val": 0},
+                "productUsage": [{"product": "GrokBuild", "usagePercent": 1.0}],
+                "isUnifiedBillingUser": True,
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = self._grok_home(temp)
+            cache = Path(temp) / "cache"
+            cache.mkdir()
+            with mock.patch.object(fleet, "HOME", root), mock.patch.object(
+                fleet, "CACHE", cache
+            ), mock.patch.object(
+                fleet, "_load_last", return_value=None
+            ), mock.patch.object(fleet, "_jget", side_effect=self._api(credits)):
+                result = fleet.api_grok()
+
+        weekly = next(metric for metric in result["metrics"] if metric["label"] == "Weekly")
+        self.assertEqual(result["plan"], "X Premium")
+        self.assertEqual(weekly["pct"], 1.0)
+        self.assertEqual(
+            [metric["label"] for metric in result["metrics"] if metric.get("pct") is not None],
+            ["Weekly"],
+        )
+        live, inactive = panel_wpf._partition_agents([result])
+        self.assertEqual([agent["agent"] for agent in live], ["Grok"])
+        self.assertEqual(inactive, [])
+
+    def test_paygo_only_cache_is_not_treated_as_usage(self):
+        credits = {
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-09-06T00:00:00+00:00",
+                },
+                "creditUsagePercent": 12.5,
+                "onDemandCap": {"val": 0},
+            }
+        }
+        paygo = [fleet.M("Pay-go", None, None, "off")]
+        with tempfile.TemporaryDirectory() as temp:
+            root = self._grok_home(temp)
+            # A successful read is cached; keep it out of the real cache folder.
+            with mock.patch.object(fleet, "HOME", root), mock.patch.object(
+                fleet, "CACHE", root
+            ), mock.patch.object(
+                fleet, "_load_last", return_value=(paygo, "X Premium", "1m", 123.0)
+            ), mock.patch.object(fleet, "_jget", side_effect=self._api(credits)):
+                result = fleet.api_grok()
+
+        weekly = next(metric for metric in result["metrics"] if metric["label"] == "Weekly")
+        self.assertEqual(weekly["pct"], 12.5)
+        self.assertNotEqual(result.get("err"), "soft cache")
+
+    def test_paygo_only_success_does_not_poison_the_usage_cache(self):
+        credits = {"config": {"onDemandCap": {"val": 0}}}
+        with tempfile.TemporaryDirectory() as temp:
+            root = self._grok_home(temp)
+            cache = Path(temp) / "cache"
+            cache.mkdir()
+            with mock.patch.object(fleet, "HOME", root), mock.patch.object(
+                fleet, "CACHE", cache
+            ), mock.patch.object(
+                fleet, "_load_last", return_value=None
+            ), mock.patch.object(fleet, "_jget", side_effect=self._api(credits)):
+                result = fleet.api_grok()
+
+            self.assertFalse(_quota := fleet._quota_metrics(result["metrics"]))
+            self.assertFalse((cache / "grok_last.json").exists())
+
+    def test_an_unused_week_reads_as_zero_not_as_missing(self):
+        # Live response from 2026-10-04: protobuf JSON drops creditUsagePercent=0.
+        credits = {
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-10-04T23:49:28.623539+00:00",
+                },
+                "onDemandCap": {"val": 0},
+                "isUnifiedBillingUser": True,
+            }
+        }
+        metrics = fleet._grok_metrics(credits, {"config": {"monthlyLimit": {"val": 0}}})
+
+        weekly = next(metric for metric in metrics if metric["label"] == "Weekly")
+        self.assertEqual(weekly["pct"], 0.0)
+        self.assertEqual(weekly["resets"], "2026-10-04T23:49:28.623539+00:00")
+        self.assertTrue(fleet._quota_metrics(metrics))
+
+    def test_wrapped_credit_percent_is_unwrapped(self):
+        metrics = fleet._grok_metrics(
+            {"config": {"creditUsagePercent": {"val": "8"}, "currentPeriod": {"type": "weekly"}}},
+            {"config": {"monthlyLimit": {"val": 0}, "used": {"val": 0}}},
+        )
+        weekly = next(metric for metric in metrics if metric["label"] == "Weekly")
+        self.assertEqual(weekly["pct"], 8.0)
+
+
+class ClaudeUsageTests(unittest.TestCase):
+    def test_a_throttled_usage_endpoint_asks_claude_code_itself(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             cred = root / ".claude" / ".credentials.json"
@@ -221,29 +681,26 @@ class ClaudeUsageTests(unittest.TestCase):
                     }
                 )
             )
-            response_headers = {
-                "Retry-After": "120",
-                "anthropic-ratelimit-unified-5h-utilization": "0.25",
-                "anthropic-ratelimit-unified-5h-reset": "2000",
-                "anthropic-ratelimit-unified-7d-utilization": "0.5",
-                "anthropic-ratelimit-unified-7d-reset": "3000",
-            }
+            printed = "Current session: 25% used\nCurrent week (all models): 50% used\n"
             with mock.patch.object(fleet, "HOME", root), mock.patch.object(
                 fleet, "CACHE", root
             ), mock.patch.object(
-                fleet, "_claude_user_agent", return_value="claude-code/test"
-            ), mock.patch.object(
                 fleet, "_jget", return_value=(429, {"Retry-After": "120"}, {})
             ), mock.patch.object(
-                fleet, "_http", return_value=(429, response_headers, b"")
-            ):
+                fleet, "_run_claude_usage", return_value=(0, printed)
+            ) as cli:
                 result = fleet.api_claude()
+                again = fleet.api_claude()
+                backoff = fleet._refresh_cooldown_left("claude_usage")
 
             self.assertEqual([m["pct"] for m in result["metrics"]], [25.0, 50.0])
             self.assertEqual(result["err"], "")
-            self.assertTrue((root / "claude_usage_backoff").exists())
+            # Both throttles hold: no second usage request, no second CLI run.
+            self.assertEqual(cli.call_count, 1)
+            self.assertIn("cached", again["err"])
+            self.assertGreaterEqual(backoff, 290)
 
-    def test_force_bypasses_an_auth_refresh_backoff(self):
+    def test_force_bypasses_a_renewal_backoff(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             cred = root / ".claude" / ".credentials.json"
@@ -263,46 +720,48 @@ class ClaudeUsageTests(unittest.TestCase):
             with mock.patch.object(fleet, "HOME", root), mock.patch.object(
                 fleet, "CACHE", root
             ), mock.patch.object(
-                fleet, "_refresh_claude_writeback", return_value=False
-            ) as refresh:
+                fleet, "_renew_claude_via_cli", return_value=("failed", [])
+            ) as renew:
                 fleet.api_claude(force=True)
 
-            refresh.assert_called_once()
+            renew.assert_called_once_with(cred, "expired", force=True)
 
-    def test_cli_can_refresh_its_own_credentials_without_exposing_output(self):
+
+class ClaudeSignInTests(unittest.TestCase):
+    def test_sign_in_runs_the_cli_in_its_own_console_then_reports_back(self):
+        finished = threading.Event()
+        process = SimpleNamespace(wait=lambda: 0)
+        with mock.patch.object(
+            fleet, "_claude_cli", return_value=r"C:\Tools\claude.exe"
+        ), mock.patch.object(fleet.subprocess, "Popen", return_value=process) as popen:
+            self.assertTrue(fleet.claude_sign_in(on_exit=finished.set))
+
+        self.assertTrue(finished.wait(5))
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], ["cmd.exe", "/c"])
+        exe = command.index(r"C:\Tools\claude.exe")
+        self.assertEqual(command[exe:exe + 3], [r"C:\Tools\claude.exe", "auth", "login"])
+        self.assertEqual(
+            popen.call_args.kwargs["creationflags"], fleet.subprocess.CREATE_NEW_CONSOLE
+        )
+        # Fleet never reads what the sign-in prints; it holds no pipe to it.
+        self.assertNotIn("stdout", popen.call_args.kwargs)
+
+    def test_sign_in_without_claude_code_installed_does_nothing(self):
+        with mock.patch.object(fleet, "_claude_cli", return_value=None), mock.patch.object(
+            fleet.subprocess, "Popen", side_effect=AssertionError("must not launch")
+        ):
+            self.assertFalse(fleet.claude_sign_in())
+
+    def test_the_native_installer_location_is_found_without_path(self):
         with tempfile.TemporaryDirectory() as temp:
-            cred = Path(temp) / ".credentials.json"
-            cred.write_text(
-                json.dumps(
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "expired",
-                            "expiresAt": (time.time() - 60) * 1000,
-                        }
-                    }
-                )
-            )
-
-            def refresh_credentials(*args, **kwargs):
-                cred.write_text(
-                    json.dumps(
-                        {
-                            "claudeAiOauth": {
-                                "accessToken": "fresh",
-                                "expiresAt": (time.time() + 3600) * 1000,
-                            }
-                        }
-                    )
-                )
-                return SimpleNamespace(returncode=0)
-
-            with mock.patch.object(
-                fleet.subprocess, "run", side_effect=refresh_credentials
-            ) as run:
-                self.assertTrue(fleet._refresh_claude_via_cli(cred))
-
-            self.assertIs(run.call_args.kwargs["stdout"], fleet.subprocess.PIPE)
-            self.assertIs(run.call_args.kwargs["stderr"], fleet.subprocess.PIPE)
+            native = Path(temp) / ".local" / "bin" / "claude.exe"
+            native.parent.mkdir(parents=True)
+            native.write_bytes(b"")
+            with mock.patch.object(fleet.shutil, "which", return_value=None), mock.patch.object(
+                fleet, "HOME", Path(temp)
+            ):
+                self.assertEqual(fleet._claude_cli(), str(native))
 
 
 class PublicReleaseTests(unittest.TestCase):
@@ -734,6 +1193,27 @@ class PackagingTests(unittest.TestCase):
 
 
 class TrayAnchorTests(unittest.TestCase):
+    def test_a_tray_click_hands_the_foreground_to_the_panel_host(self):
+        # The shell grants the foreground to the icon's owner, not to the panel
+        # host that draws the flyout; without the handoff it opened unfocused.
+        calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            heartbeat = Path(temp) / "panel-heartbeat.json"
+            heartbeat.write_text("{}")
+            host = SimpleNamespace(pid=4242, poll=lambda: None)
+            with mock.patch.object(tray, "_PANEL_PROCESS", host), mock.patch.object(
+                tray, "PANEL_HEARTBEAT", heartbeat
+            ), mock.patch.object(
+                tray, "_allow_panel_foreground",
+                side_effect=lambda pid: calls.append(("allow", pid)),
+            ), mock.patch.object(
+                tray, "_write_panel_signal",
+                side_effect=lambda icon: calls.append(("signal", icon)),
+            ):
+                tray.ensure_panel_host(show=True, icon="icon")
+
+        self.assertEqual(calls, [("allow", 4242), ("signal", "icon")])
+
     def test_show_signal_carries_the_notification_icon_rectangle(self):
         with tempfile.TemporaryDirectory() as temp:
             signal = Path(temp) / "panel.show"
@@ -750,169 +1230,7 @@ class TrayAnchorTests(unittest.TestCase):
         self.assertIsInstance(payload["ts"], int)
 
 
-class TrayIconTests(unittest.TestCase):
-    def test_cycle_uses_each_providers_worst_cached_usage(self):
-        data = [
-            {"agent": "Claude", "metrics": [{"pct": 24}, {"pct": 71}]},
-            {"agent": "Codex", "metrics": [{"pct": None}]},
-        ]
-
-        self.assertEqual(tray.usage_cycle(data), [("Claude", 71), ("Codex", None)])
-
-    def test_api_providers_are_capped_and_ordered_worst_first(self):
-        data = [
-            {"agent": "Claude", "metrics": [{"pct": 24}]},
-            {"agent": "Codex", "metrics": [{"pct": 10}]},
-            {"agent": "Grok", "metrics": [{"pct": 5}]},
-            {"agent": "Antigrav", "metrics": [{"pct": 1}]},
-            {"agent": "DeepSeek", "compact": True, "metrics": [{"pct": None, "extra": "$4.00"}]},
-            {"agent": "OpenRouter", "compact": True, "metrics": [{"pct": 90}]},
-            {"agent": "Kimi", "compact": True, "metrics": [{"pct": 40}]},
-        ]
-
-        cycle = tray.usage_cycle(data)
-
-        self.assertEqual(len(cycle), tray.CYCLE_CAP)
-        self.assertEqual(cycle[4], ("OpenRouter", 90))
-        self.assertEqual(cycle[5], ("Kimi", 40))
-
-    def test_balance_only_api_providers_stay_out_of_the_icon_cycle(self):
-        data = [
-            {"agent": "Codex", "metrics": [{"pct": None}]},
-            {
-                "agent": "OpenRouter",
-                "compact": True,
-                "metrics": [{"pct": None, "extra": "$6.50"}],
-            },
-        ]
-
-        self.assertEqual(tray.usage_cycle(data), [("Codex", None)])
-        self.assertNotIn("OpenRouter", tray.tooltip(data))
-
-    def test_all_balance_only_providers_use_the_static_fleet_fallback(self):
-        data = [
-            {
-                "agent": "OpenRouter",
-                "compact": True,
-                "metrics": [{"pct": None, "extra": "$6.50"}],
-            }
-        ]
-
-        self.assertEqual(tray.usage_cycle(data), [(None, None)])
-
-    def test_the_tooltip_stays_inside_the_windows_limit(self):
-        data = [
-            {"agent": f"Provider{index}", "compact": True, "metrics": [{"pct": 50 + index}]}
-            for index in range(12)
-        ]
-
-        text = tray.tooltip(data)
-
-        self.assertLessEqual(len(text), 126)
-        self.assertTrue(text.startswith("FLEET"))
-
-    def test_a_provider_fleet_has_no_table_entry_for_still_gets_a_mark(self):
-        icon = tray.make_icon_image("OpenRouter", 30)
-
-        self.assertEqual(icon.size, (256, 256))
-        self.assertEqual(icon.mode, "RGBA")
-        self.assertEqual(tray._mark_for("OpenRouter"), "OR")
-        self.assertEqual(tray._accent_for("Kimi"), tray._accent_for("Kimi"))
-
-    def test_provider_mark_changes_the_icon(self):
-        claude = tray.make_icon_image("Claude", 50)
-        codex = tray.make_icon_image("Codex", 50)
-
-        self.assertEqual(claude.size, (256, 256))
-        self.assertNotEqual(claude.tobytes(), codex.tobytes())
-
-    def test_usage_meter_changes_without_using_a_fake_provider_colour(self):
-        tray.make_icon_image.cache_clear()
-        with mock.patch.object(
-            tray,
-            "_accent_for",
-            side_effect=AssertionError("tray icon must not use fake brand colours"),
-        ):
-            empty = tray.make_icon_image("CustomMeter", 0)
-            full = tray.make_icon_image("CustomMeter", 100)
-
-        self.assertNotEqual(empty.tobytes(), full.tobytes())
-
-    def test_provider_tile_optically_fills_a_16px_tray_slot(self):
-        from PIL import Image
-
-        small = tray.make_icon_image("Grok", 100).resize(
-            (16, 16), Image.Resampling.LANCZOS
-        )
-        opaque_pixels = sum(small.getchannel("A").histogram()[128:])
-
-        self.assertGreaterEqual(opaque_pixels, 240)
-
-    def test_full_usage_remains_a_readable_band_at_16px(self):
-        from PIL import Image
-
-        small = tray.make_icon_image("Grok", 100).resize(
-            (16, 16), Image.Resampling.LANCZOS
-        ).convert("RGB")
-        target = tray._hex_to_rgb(tray.sev(100))
-
-        def is_usage_colour(pixel):
-            distance = sum(
-                (channel - expected) ** 2
-                for channel, expected in zip(pixel, target)
-            )
-            return distance < 75 ** 2
-
-        bottom_band = [
-            sum(is_usage_colour(small.getpixel((x, y))) for x in range(16))
-            for y in (12, 13, 14, 15)
-        ]
-
-        self.assertTrue(all(count >= 12 for count in bottom_band), bottom_band)
-
-    def test_low_positive_usage_survives_pystray_resampling(self):
-        from PIL import Image
-
-        # pystray loads a 32 px ICO frame and the shell reduces it again for a
-        # 16 px taskbar. A 5% fill still needs one visible logical pixel.
-        small = tray.make_icon_image("CustomMeter", 5).resize(
-            (32, 32), Image.Resampling.LANCZOS
-        ).resize((16, 16), Image.Resampling.LANCZOS).convert("RGB")
-        target = tray._hex_to_rgb(tray.sev(5))
-
-        def is_usage_colour(pixel):
-            distance = sum(
-                (channel - expected) ** 2
-                for channel, expected in zip(pixel, target)
-            )
-            return distance < 75 ** 2
-
-        bottom_band = [
-            sum(is_usage_colour(small.getpixel((x, y))) for x in range(16))
-            for y in (12, 13, 14)
-        ]
-
-        self.assertTrue(all(count >= 1 for count in bottom_band), bottom_band)
-
-    def test_meter_length_tracks_usage_at_16px(self):
-        from PIL import Image
-
-        for pct, expected_width in ((0, 0), (25, 4), (50, 8), (75, 12), (100, 16)):
-            small = tray.make_icon_image("CustomMeter", pct).resize(
-                (16, 16), Image.Resampling.LANCZOS
-            ).convert("RGB")
-            target = tray._hex_to_rgb(tray.sev(pct))
-            actual_width = sum(
-                sum(
-                    (channel - expected) ** 2
-                    for channel, expected in zip(small.getpixel((x, 13)), target)
-                ) < 75 ** 2
-                for x in range(16)
-            )
-
-            with self.subTest(pct=pct):
-                self.assertAlmostEqual(actual_width, expected_width, delta=1)
-
+class TrayRefreshTests(unittest.TestCase):
     def test_refresh_now_bypasses_claude_backoff(self):
         icon = object()
         with mock.patch.object(
@@ -1089,6 +1407,32 @@ class CompactProviderTests(unittest.TestCase):
         self.assertNotIn('Text="credits"', markup)
         self.assertNotIn("$0", markup)
 
+    def test_an_off_only_provider_moves_to_inactive(self):
+        agents = [
+            {
+                "agent": "Grok",
+                "metrics": [{"label": "Pay-go", "pct": None, "extra": "off"}],
+                "err": "",
+            }
+        ]
+
+        live, inactive = panel_wpf._partition_agents(agents)
+
+        self.assertEqual(live, [])
+        self.assertEqual([agent["agent"] for agent in inactive], ["Grok"])
+        self.assertEqual(inactive[0]["_inactive_reason"], "off")
+
+        markup = panel_wpf._xaml(
+            agents,
+            time.time(),
+            True,
+            SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m"),
+        )
+        self.assertIn('Tag="InactiveProviders"', markup)
+        self.assertIn('Text="Grok"', markup)
+        self.assertIn('Text="off"', markup)
+        self.assertNotIn('Tag="ProviderRow"', markup)
+
     def test_a_local_cli_provider_keeps_every_window(self):
         agent = {
             "agent": "Claude",
@@ -1114,10 +1458,9 @@ class CompactProviderTests(unittest.TestCase):
         self.assertEqual(self._rows(agent), 1)
         self.assertIn("$4.00", markup)
 
-    def test_unknown_providers_get_a_stable_colour(self):
-        self.assertEqual(panel_wpf._accent_for("Kimi"), panel_wpf._accent_for("Kimi"))
-        self.assertIn(panel_wpf._accent_for("Kimi"), panel_wpf.API_ACCENTS)
-        self.assertEqual(panel_wpf._mark_for("openrouter"), "O")
+    def test_unknown_providers_get_a_compact_neutral_monogram(self):
+        self.assertEqual(panel_wpf._mark_for("OpenRouter"), "OR")
+        self.assertEqual(panel_wpf._mark_for("openrouter"), "OP")
 
 
 class PanelSurfaceTests(unittest.TestCase):
@@ -1150,7 +1493,7 @@ class PanelSurfaceTests(unittest.TestCase):
     def test_opaque_theme_stays_solid(self):
         for light in (True, False):
             theme = panel_wpf._theme(light, acrylic=False)
-            for token, value in theme.items():
+            for token, value in sorted(theme.items()):
                 with self.subTest(light=light, token=token):
                     self.assertRegex(value, r"^#FF[0-9A-Fa-f]{6}$")
 
@@ -1187,8 +1530,10 @@ class PanelSurfaceTests(unittest.TestCase):
             SimpleNamespace(_until=lambda _: "3h"),
         )
 
-        self.assertIn('Text="· 3h"', markup)
+        # The reset has its own column now, so it needs no separator glyph.
+        self.assertIn('Text="3h"', markup)
         self.assertEqual(markup.count('Tag="MetricUsage"'), 1)
+        self.assertIn(f'Height="{panel_wpf.ROW_HEIGHT:.0f}"', markup)
         self.assertIn(f'Height="{panel_wpf.BAR_HEIGHT:.0f}"', markup)
 
     def test_panel_uses_native_variable_type(self):
@@ -1215,9 +1560,11 @@ class PanelSurfaceTests(unittest.TestCase):
             SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m"),
         )
 
-        self.assertIn("1/2 live · 8m old", markup)
+        self.assertIn("updated", markup)
+        self.assertEqual(markup.count('Tag="ProviderRow"'), 2)
+        self.assertIn('ToolTip="offline · 8m old"', markup)
 
-    def test_each_provider_icon_identifies_its_own_freshness(self):
+    def test_cached_readings_stay_visible_and_are_labelled(self):
         data = [
             {
                 "agent": "Claude",
@@ -1239,9 +1586,67 @@ class PanelSurfaceTests(unittest.TestCase):
             SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m"),
         )
 
-        self.assertIn('ToolTip="live"', markup)
-        self.assertIn('ToolTip="cached · 8m old"', markup)
-        self.assertIn('ToolTip="unavailable · offline"', markup)
+        self.assertEqual(markup.count('Tag="ProviderRow"'), 2)
+        self.assertEqual(markup.count('Tag="InactiveProvider"'), 1)
+        self.assertIn('ToolTip="offline · 8m old"', markup)
+        self.assertIn('ToolTip="offline"', markup)
+        self.assertNotIn('Tag="ProviderStatus"', markup)
+
+    def test_not_connected_providers_are_neutral_and_do_not_poison_health(self):
+        data = [
+            {
+                "agent": "Claude",
+                "metrics": [],
+                "err": "no Claude Code credentials",
+                "configured": False,
+                "known": True,
+            },
+            {
+                "agent": "Codex",
+                "metrics": [{"label": "Session", "pct": 12, "resets": None}],
+                "err": "",
+            },
+        ]
+        markup = panel_wpf._xaml(
+            data,
+            999.0,
+            True,
+            SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m"),
+        )
+
+        self.assertIn("updated", markup)
+        self.assertNotIn("1/2 live", markup)
+        self.assertIn('Tag="InactiveProviders"', markup)
+        self.assertIn('Text="1 inactive"', markup)
+        self.assertIn('ToolTip="no Claude Code credentials"', markup)
+        self.assertNotIn(panel_wpf.GRAD["r"], markup)
+        self.assertLess(markup.index('Text="Codex"'), markup.index('Text="Claude"'))
+
+    def test_completely_absent_providers_are_omitted(self):
+        data = [
+            {
+                "agent": "Claude",
+                "metrics": [],
+                "err": "no Claude Code credentials",
+                "configured": False,
+                "known": False,
+            },
+            {
+                "agent": "Codex",
+                "metrics": [{"label": "Session", "pct": 12, "resets": None}],
+                "err": "",
+            },
+        ]
+        markup = panel_wpf._xaml(
+            data,
+            999.0,
+            True,
+            SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m"),
+        )
+
+        self.assertIn('Text="Codex"', markup)
+        self.assertNotIn('Text="Claude"', markup)
+        self.assertNotIn('Tag="InactiveProviders"', markup)
 
     def test_panel_uses_provider_artwork(self):
         markup = self._markup()
@@ -1254,24 +1659,92 @@ class PanelSurfaceTests(unittest.TestCase):
     def test_each_metric_occupies_exactly_one_fixed_height_row(self):
         # Each provider owns its identity once, above one visual row per metric.
         markup = self._markup()
-        rows = markup.count('Tag="MetricUsage"') + markup.count('Tag="MetricAmount"')
+        rows = (
+            markup.count('Tag="MetricUsage"')
+            + markup.count('Tag="MetricAmount"')
+            + markup.count('Tag="MetricCompact"')
+        )
         metrics = sum(len(agent["metrics"]) for agent in SAMPLE_AGENTS)
 
         self.assertEqual(rows, metrics)
         self.assertEqual(markup.count('Tag="ProviderHeader"'), len(SAMPLE_AGENTS))
 
-    def test_meter_uses_the_full_content_width(self):
-        # Provider identity no longer steals most of every metric's meter.
-        self.assertEqual(panel_wpf.BAR_TRACK, panel_wpf.CONTENT_WIDTH)
+    def test_each_live_provider_floats_on_its_own_glass_platter(self):
+        # Glass reads as glass where the blur shows between panes; one shared
+        # slab with dividers hid it behind a single opaque-looking card.
+        markup = self._markup()
+
+        self.assertEqual(markup.count('Tag="LiveSurface"'), 1)
+        self.assertEqual(markup.count('Tag="ProviderRow"'), len(SAMPLE_AGENTS))
+        self.assertNotIn('Tag="ProviderDivider"', markup)
+
+    def test_a_warm_shell_accent_never_becomes_the_calm_meter_colour(self):
+        # Amber and coral mean pressure. A user whose Windows accent is red must
+        # not see every low quota painted as a warning.
+        for rgb in ((0xE8, 0x11, 0x23), (0xFF, 0xB9, 0x00)):
+            with self.subTest(rgb=rgb):
+                self.assertTrue(panel_wpf._is_warm(rgb))
+        for rgb in ((0x75, 0xB7, 0xEA), (0x10, 0x89, 0x3E), (0x74, 0x4D, 0xA9)):
+            with self.subTest(rgb=rgb):
+                self.assertFalse(panel_wpf._is_warm(rgb))
+
+    def test_the_meter_ramp_keeps_pressure_distinct_from_the_accent(self):
+        with mock.patch.dict(panel_wpf._ACCENT, {"pair": None}):
+            ramp = panel_wpf._meter(False)
+
+        self.assertEqual(ramp["meter_g"], panel_wpf.METER_FALLBACK["dark"])
+        self.assertEqual(ramp["meter_y"], panel_wpf.METER_PRESSURE["y"])
+        self.assertEqual(ramp["meter_r"], panel_wpf.METER_PRESSURE["r"])
+
+    def test_a_quota_under_pressure_colours_its_value_too(self):
+        theme = panel_wpf._theme(False)
+        calm = panel_wpf._metric_row({"label": "week", "pct": 20}, theme)
+        critical = panel_wpf._metric_row({"label": "week", "pct": 92}, theme)
+
+        self.assertIn(f'Foreground="{theme["fg"]}"', calm)
+        self.assertIn(f'Foreground="{theme["meter_r"]}"', critical)
+        # The reading stays legible without the meter being read at all.
+        self.assertEqual(critical.count(theme["meter_r"]), 2)
+
+    def test_the_disclosure_replaces_the_stock_expander_chrome(self):
+        markup = panel_wpf._xaml(
+            SAMPLE_AGENTS + [{"agent": "Grok", "metrics": [], "err": "offline", "known": True}],
+            time.time(),
+            False,
+            SimpleNamespace(_until=lambda _: "3h", _age=lambda _: "8m"),
+        )
+
+        self.assertIn('Tag="InactiveProviders"', markup)
+        # Stock WPF draws a circular chevron button floating outside the surface.
+        self.assertIn("<Expander.Template>", markup)
+        self.assertIn(panel_wpf.GLYPH_CHEVRON_DOWN, markup)
+        self.assertIn(panel_wpf.GLYPH_CHEVRON_UP, markup)
+
+    def test_a_quota_row_spends_the_content_width_exactly(self):
+        # One line per quota: name, meter, value, reset. The columns are declared
+        # in DIPs, so a track that does not match its column silently clips or
+        # leaves a gap at the end of every meter.
         self.assertEqual(
             panel_wpf.CONTENT_WIDTH,
             panel_wpf.PANEL_WIDTH
+            - 2 * panel_wpf.PANEL_BORDER
             - 2 * panel_wpf.WINDOW_PADDING
             - 2 * panel_wpf.CARD_BORDER
             - 2 * panel_wpf.CARD_PADDING,
         )
-        self.assertGreaterEqual(panel_wpf.BAR_TRACK, 250.0)
-        self.assertGreaterEqual(panel_wpf.VALUE_COLUMN, 56.0)
+        self.assertEqual(
+            panel_wpf.LABEL_COLUMN
+            + panel_wpf.METER_COLUMN
+            + panel_wpf.VALUE_COLUMN
+            + panel_wpf.RESET_COLUMN,
+            panel_wpf.CONTENT_WIDTH,
+        )
+        self.assertEqual(
+            panel_wpf.BAR_TRACK,
+            panel_wpf.METER_COLUMN
+            - panel_wpf.METER_INSET_LEFT
+            - panel_wpf.METER_INSET_RIGHT,
+        )
 
     def test_a_bar_never_exceeds_its_track_and_zero_stays_empty(self):
         for pct in (0, 1, 41, 88, 100):
@@ -1292,31 +1765,112 @@ class PanelSurfaceTests(unittest.TestCase):
         self.assertIn('Tag="MetricAmount"', amount)
         self.assertNotIn(f'Height="{panel_wpf.BAR_HEIGHT:.0f}"', amount)
 
-    def test_repeated_zero_quotas_are_a_collapsed_disclosure(self):
+    def test_antigravity_quotas_are_always_visible_in_compact_light_and_dark(self):
         agent = {
             "agent": "Antigrav",
+            "compact": True,
             "metrics": [
                 {"label": "Weekly", "pct": 0, "_reset_text": "6d"},
-                {"label": "Session", "pct": 0, "_reset_text": "4h"},
-                {"label": "Claude Wk", "pct": 5, "_reset_text": "5d"},
-                {"label": "Claude", "pct": 0, "_reset_text": "1h"},
+                {"label": "Session", "pct": 17, "_reset_text": "4h"},
+                {"label": "Claude Wk", "pct": 54, "_reset_text": "5d"},
+                {"label": "Claude", "pct": 92, "_reset_text": "1h"},
             ],
         }
 
-        markup = panel_wpf._card(agent, panel_wpf._theme(True))
+        for light in (True, False):
+            with self.subTest(light=light):
+                markup = panel_wpf._card(agent, panel_wpf._theme(light))
 
-        self.assertEqual(markup.count('Tag="MetricUsage"'), 4)
-        self.assertEqual(markup.count('Tag="MetricAmount"'), 0)
-        self.assertIn('<Expander Tag="ZeroUsage:Antigravity" IsExpanded="False"', markup)
-        self.assertIn('Text="3 quotas at 0%"', markup)
-        self.assertIn('AutomationProperties.Name="3 quotas at 0%; expand for details"', markup)
-        self.assertIn(
-            'ToolTip="gemini week at 0% · resets 6d; gemini session at 0% · resets 4h; claude session at 0% · resets 1h"',
-            markup,
+                self.assertEqual(markup.count('Tag="MetricCompact"'), 4)
+                self.assertEqual(markup.count('Tag="MetricCompact" Height="28"'), 4)
+                self.assertEqual(markup.count('Tag="MetricUsage"'), 0)
+                self.assertEqual(markup.count('Tag="MetricAmount"'), 0)
+                self.assertIn('Tag="QuotaGrid" Height="40"', markup)
+                self.assertIn('Tag="QuotaValues" Grid.Row="1" Columns="4"', markup)
+                self.assertEqual(markup.count('Tag="QuotaGroup"'), 2)
+                self.assertEqual(markup.count('Tag="QuotaWindow"'), 4)
+                self.assertNotIn("Expander", markup)
+                self.assertNotIn("ZeroUsage", markup)
+                self.assertIn('Text="gemini"', markup)
+                self.assertIn('Text="claude"', markup)
+                self.assertEqual(markup.count('Text="week"'), 2)
+                self.assertEqual(markup.count('Text="session"'), 2)
+                for value in ("0%", "17%", "54%", "92%"):
+                    self.assertIn(f'Text="{value}"', markup)
+
+    def test_platters_are_lit_glass_rather_than_flat_cards(self):
+        # A pane of glass is brightest along its top edge and falls away below.
+        for light in (True, False):
+            theme = panel_wpf._theme(light)
+            markup = panel_wpf._card(SAMPLE_AGENTS[0], theme)
+            with self.subTest(light=light):
+                self.assertIn(f'<GradientStop Color="{theme["card_hi"]}" Offset="0"/>', markup)
+                self.assertIn(f'<GradientStop Color="{theme["card_bg"]}" Offset="1"/>', markup)
+                self.assertIn(f'<GradientStop Color="{theme["rim_top"]}" Offset="0"/>', markup)
+                self.assertIn(f'<GradientStop Color="{theme["rim_bot"]}" Offset="1"/>', markup)
+
+    def test_a_signed_out_claude_offers_a_one_click_sign_in(self):
+        for err in (fleet.CLAUDE_SIGNED_OUT, fleet.CLAUDE_EXPIRED):
+            data = [
+                {"agent": "Claude", "metrics": [], "err": err, "configured": False, "known": True},
+                {"agent": "Codex", "metrics": [{"label": "Weekly", "pct": 12, "resets": None}], "err": ""},
+            ]
+            markup = panel_wpf._content_xaml(
+                data, time.time(), True, SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m")
+            )
+            with self.subTest(err=err):
+                self.assertEqual(markup.count('Tag="ClaudeSignIn"'), 1)
+                self.assertIn('Text="Sign in"', markup)
+                self.assertIn("claude auth login", markup)
+
+    def test_only_a_signed_out_claude_gets_the_sign_in_button(self):
+        data = [
+            {"agent": "Grok", "metrics": [], "err": "offline", "known": True},
+            {"agent": "Claude", "metrics": [], "err": "offline", "known": True},
+            {"agent": "Claude", "metrics": [], "err": fleet.CLAUDE_SIGNED_OUT, "known": True,
+             "cached_at": 100.0},
+        ]
+        markup = panel_wpf._content_xaml(
+            data, time.time(), True, SimpleNamespace(_until=lambda _: "", _age=lambda _: "8m")
         )
-        for label in ("gemini week", "gemini session", "claude week", "claude session"):
-            with self.subTest(label=label):
-                self.assertIn(f'Text="{label}"', markup)
+
+        self.assertNotIn("ClaudeSignIn", markup)
+
+    def test_accent_acrylic_is_the_default_material(self):
+        # On build 29648 the official system backdrop drew a flat fill even for
+        # a focused flyout; accent acrylic kept blurring.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FLEET_MATERIAL", None)
+            os.environ.pop("FLEET_OPAQUE", None)
+            self.assertEqual(panel_wpf._material(), "accent")
+        for value, expected in (("system", "system"), ("OPAQUE", "opaque"), ("bogus", "accent")):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"FLEET_MATERIAL": value}):
+                self.assertEqual(panel_wpf._material(), expected)
+        with mock.patch.dict(os.environ, {"FLEET_OPAQUE": "1", "FLEET_MATERIAL": "accent"}):
+            self.assertEqual(panel_wpf._material(), "opaque")
+
+    def test_the_accent_tint_stays_translucent(self):
+        for light in (True, False):
+            alpha = panel_wpf._accent_tint(light) >> 24
+            with self.subTest(light=light):
+                self.assertGreater(alpha, 0)
+                self.assertLess(alpha, 0xC0)
+
+    def test_the_glass_is_lit_even_when_the_flyout_lacks_focus(self):
+        # DWM draws an inactive system backdrop as a flat grey fill; the panel
+        # host cannot always win the foreground from a tray click.
+        sent = []
+        panel_wpf._light_backdrop(4242, send=lambda *args: sent.append(args))
+        panel_wpf._light_backdrop(0, send=lambda *args: sent.append(("unexpected",)))
+
+        self.assertEqual(len(sent), 1)
+        hwnd, message, wparam, lparam = sent[0]
+        self.assertEqual(hwnd.value, 4242)
+        self.assertEqual((message, wparam, lparam), (0x0086, 1, 0))
+        source = Path(panel_wpf.__file__).read_text(encoding="utf-8")
+        opening = source.split("def begin_open_slide():", 1)[1].split("def ", 1)[0]
+        self.assertIn("light_backdrop()", opening)
+        self.assertIn("_defer_to_dispatcher(window.Dispatcher, light_backdrop)", source)
 
     def test_the_provider_name_appears_once_per_provider(self):
         markup = self._markup()
@@ -1406,6 +1960,47 @@ class PanelMaterialTests(unittest.TestCase):
 
         self.assertIn('Topmost="True" Opacity="0"', markup)
         self.assertIn('<StackPanel x:Name="ContentRoot" Opacity="1">', markup)
+
+    def test_foreground_is_taken_on_its_own_dispatcher_frame(self):
+        """0x8001010d: a COM call-out inside an input-sync dispatch kills the host."""
+        calls = []
+        queued = []
+        window = SimpleNamespace(Dispatcher=object())
+        window.Opacity = 0.0
+        window.UpdateLayout = lambda: None
+        window.Show = lambda: calls.append("show")
+        window.Activate = lambda: calls.append("activate")
+
+        with mock.patch.object(
+            panel_wpf,
+            "_defer_to_dispatcher",
+            lambda dispatcher, callback: queued.append((dispatcher, callback)),
+        ):
+            panel_wpf._present_prepared_window(
+                window, None, lambda anchor: None, lambda: None, lambda: None
+            )
+
+        self.assertEqual(calls, ["show"])
+        self.assertEqual(len(queued), 1)
+        self.assertIs(queued[0][0], window.Dispatcher)
+        queued[0][1]()
+        self.assertEqual(calls, ["show", "activate"])
+
+    def test_a_named_local_source_is_not_labelled_as_a_fleet_cache(self):
+        data = [
+            {
+                "agent": "Claude",
+                "plan": "pro",
+                "err": "",
+                "source": "desktop",
+                "cached_at": time.time() - 720,
+                "metrics": [fleet.M("Session", 12), fleet.M("Weekly", 15)],
+            }
+        ]
+        markup = panel_wpf._content_xaml(data, time.time(), True, fleet)
+
+        self.assertIn('Text="desktop · 12m old"', markup)
+        self.assertNotIn('Text="cached · 12m old"', markup)
 
     def test_prepared_window_is_final_before_show(self):
         calls = []

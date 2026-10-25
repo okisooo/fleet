@@ -1,31 +1,35 @@
 <p><a href="https://github.com/okisooo/fleet/releases/latest"><picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/okisooo/fleet/main/docs/fleet-sleeve-dark.svg">
-  <img src="https://raw.githubusercontent.com/okisooo/fleet/main/docs/fleet-sleeve-light.svg" alt="fleet — AI usage and quota tracker for Windows 11, one tray away. Fleet's ring mark stands in for the F; every reading is marked live, cached or unavailable; Claude Code, Codex, Grok CLI, Antigravity, OpenRouter, DeepSeek, Kimi, MiniMax, Z.AI and LiteLLM" width="900">
+  <img src="https://raw.githubusercontent.com/okisooo/fleet/main/docs/fleet-sleeve-light.svg" alt="fleet: ai usage and quota tracker for Windows 11" width="900">
 </picture></a></p>
 
 <p align="center">
-  <strong>ai usage and quota tracker for Windows 11</strong> · v0.2.0 · MIT<br>
-  <a href="https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-Setup-0.2.0.exe">Windows installer</a> · <a href="https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-0.2.0-portable.zip">portable ZIP</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a>
+  <strong>ai usage and quota tracker for Windows 11</strong> · v0.3.0 · MIT<br>
+  <a href="https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-Setup-0.3.0.exe">Windows installer</a> · <a href="https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-0.3.0-portable.zip">portable ZIP</a> · <a href="#quick-start">setup</a> · <a href="docs/providers.md">provider guide</a>
 </p>
 
 track Claude Code, OpenAI Codex, Grok CLI, Google Antigravity, and API providers
-without opening each service. quota meters cycle in the Windows tray; the flyout
-brings usage, balances, and reset times together. readings are marked **live,
-cached, or unavailable**, so an older result stays visibly older.
+without opening each service. a tray meter tracks quota pressure; the native flyout
+brings limits, reset times, pace, balances, and what your tokens would cost at API
+prices together. readings are marked **live, cached, or unavailable**, so an
+older result stays visibly older.
 
 <p align="center">
-  <img src="docs/screenshot.png" width="320" height="592" alt="Fleet v0.2.0 flyout with Claude, Codex, Grok, and Antigravity quota meters, reset times, and an OpenRouter balance">
-  <br><sub>the public v0.2.0 screenshot; readings depend on your connected accounts.</sub>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+    <img src="docs/screenshot.png" width="400" alt="Fleet native dashboard with quota meters, API-price estimates and Claude API spending">
+  </picture>
+  <br><sub>v0.3.0 native flyout; sample data. readings depend on your connected accounts.</sub>
 </p>
 
 ## download
 
-| v0.2.0 · Python included | getting started |
+| v0.3.0 · Python included | getting started |
 | --- | --- |
-| **[Windows installer](https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-Setup-0.2.0.exe)** | per-user install; no administrator prompt; optional start at sign-in |
-| **[portable ZIP](https://github.com/okisooo/fleet/releases/download/v0.2.0/Fleet-0.2.0-portable.zip)** | extract and run `Fleet.exe` |
+| **[Windows installer](https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-Setup-0.3.0.exe)** | per-user install; no administrator prompt; optional start at sign-in |
+| **[portable ZIP](https://github.com/okisooo/fleet/releases/download/v0.3.0/Fleet-0.3.0-portable.zip)** | extract and run `Fleet.exe` |
 
-[release notes and SHA-256 checksums](https://github.com/okisooo/fleet/releases/tag/v0.2.0)
+[release notes and SHA-256 checksums](https://github.com/okisooo/fleet/releases/tag/v0.3.0)
 · [latest release](https://github.com/okisooo/fleet/releases/latest)
 
 > [!WARNING]
@@ -33,16 +37,16 @@ cached, or unavailable**, so an older result stays visibly older.
 > download from this repository's releases and check the published checksums.
 
 to upgrade, rerun the installer or quit Fleet before replacing portable files.
-the v0.2.0 ZIP contains an older README and omits linked guides; use the
-[online setup](https://github.com/okisooo/fleet#quick-start) and
-[provider guide](https://github.com/okisooo/fleet/blob/main/docs/providers.md).
+keep `_internal` beside `Fleet.exe` when upgrading a portable copy.
 
 ## what you can track
 
 | source | available readings |
 | --- | --- |
 | **local clients** | Claude Code, OpenAI Codex, Grok CLI, and Google Antigravity quotas, using existing client credentials |
-| **API providers** | OpenRouter, DeepSeek, Kimi/Moonshot, MiniMax, Z.AI, and LiteLLM balances or usage; OpenAI and Anthropic organisation costs with admin keys |
+| **cost estimates** | what Claude Code and Codex tokens would cost at public API prices, from local logs: today, 7 and 30 days, plus burn rate. estimates only; subscriptions are not billed per token |
+| **API providers** | OpenRouter, DeepSeek, Kimi/Moonshot, MiniMax, Z.AI, and LiteLLM balances or usage; OpenAI organization cost with an admin key |
+| **Claude API** | free connection check for a regular key; this month's and today's (UTC) organization spend for an admin key. the included Max/Team credit balance is shown only in Claude Console, which **Open billing** links to |
 | **opt-in probes** | rate-limit headers from OpenAI, Anthropic, and other supported APIs; real inference requests that may cost money |
 | **custom providers** | map an HTTPS JSON usage endpoint for a gateway, proxy, or self-hosted service |
 
@@ -65,7 +69,12 @@ including unsupported Gemini API keys and console-only dashboards.
 left-click the icon to toggle the flyout; right-click for **Refresh now** or
 **Quit**. check Windows' tray overflow if the icon is hidden.
 
-API usage endpoints activate when their key is available. **rate-limit probes
+for a Claude API account, open **Settings → Claude API**, choose **Connect**, and
+paste a key. Fleet keeps it in Windows Credential Manager for your Windows user,
+never in config or cache files; environment variables still take precedence.
+a regular key only lists models (free); organization spend needs an admin key.
+
+other API usage endpoints activate when their key is available. **rate-limit probes
 are off by default:** `"probe": true` sends a one-token inference request on each
 poll, may cost money, and appears in the provider's logs.
 
@@ -76,9 +85,13 @@ variables, not the config file. see the [setup guide](docs/providers.md) and
 
 ## privacy and troubleshooting
 
-Fleet has no telemetry or Fleet backend. it reads local credentials and contacts
-providers directly; authentication flows may refresh those credentials. runtime
+Fleet has no telemetry or hosted Fleet service. it reads local credentials and contacts
+providers directly; authentication flows may refresh those credentials. saved
+Claude API keys use Windows Credential Manager and admin keys are used only for
+read-only cost reports. runtime
 state lives in `%LOCALAPPDATA%\Fleet\.cache` (packaged) or `.cache` (source).
+an authenticated local loopback bridge lets T3 Code read supported usage; it does
+not expose Claude API admin keys.
 
 for missing or stale readings, check sign-in or key setup, then **Refresh now**.
 OpenRouter management keys show account credits; regular keys use a key
@@ -115,6 +128,11 @@ diagnostics without opening the flyout:
 ```
 
 `--providers` lists API-key configuration; `--dry` polls and prints readings.
+for the native dashboard and key setup, install a .NET SDK and run
+`dotnet build native\FleetPanel\FleetPanel.csproj -c Release` before launching
+from source. without that build the Python launcher uses the compatibility
+flyout. the release script builds the packaged copy; see
+[building from source](CONTRIBUTING.md#building-a-release-locally).
 see [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## more from OKISO

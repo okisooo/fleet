@@ -4,8 +4,8 @@ Fleet shows two kinds of provider:
 
 - **local clients** — Claude Code, Codex, Grok, Antigravity. Detected automatically
   from the CLI/app state already on the machine. Nothing to configure.
-- **public API keys** — an API key in an environment variable. Each one adds a
-  single compact row to the flyout.
+- **public API keys** — an environment variable, or a Claude key saved through
+  Settings. Each adds its own row to the flyout.
 
 Anything Fleet does not ship can be added as a **custom entry**, which uses the
 same engine: one HTTPS GET, and dotted paths that pick the numbers out of the
@@ -25,8 +25,47 @@ Check what Fleet sees:
 .\.venv\Scripts\python.exe fleet.py --providers
 ```
 
-Keys are read from the environment only. Fleet never writes a key to disk, never
-logs one, and the config file holds variable *names*, never secrets.
+Keys come from environment variables or, for Claude API accounts, Windows
+Credential Manager. Fleet never puts keys in JSON, caches or logs. Config holds
+variable *names*, never secrets. Environment variables take precedence over saved keys.
+
+### Claude API accounts
+
+**Open billing** in Settings works without saving a key. Use it to check the
+included Max/Team credit balance directly in Console.
+
+Open **Settings → Claude API**, choose **Connect** beside **API key** or **Admin
+key**, paste the key into the hidden field, and choose **Save key**. **Change**
+replaces a saved key; **Remove** removes only Fleet's saved credential. The key
+stays in the current Windows user's Credential Manager (`Fleet/api/anthropic`
+or `Fleet/api/anthropic-admin`). Fleet refreshes after saving or removing it.
+
+- A regular key uses a free `GET /v1/models` connection check. **Open billing**
+  opens the Claude Console to view prepaid credits. No inference request is sent.
+- An organization billing credential shows month-to-date and today's spend, in
+  UTC days, for the whole organization. Amounts are converted from decimal cents
+  and summed across the complete paginated report. Empty reports show $0.00.
+- [Anthropic's cost API](https://platform.claude.com/docs/en/manage-claude/usage-cost-api)
+  reports spend, not prepaid credit balance, and excludes Priority Tier costs.
+  Reports usually lag by five minutes and can take longer. Fleet polls every five
+  minutes, or when you choose **Refresh now**. Individual accounts without Admin
+  API access cannot use organization reports.
+- The supported billing credential is an admin key, or another credential with
+  organization billing access. A workspace inference key cannot read reports.
+- These figures do not enter the local **Cost at API prices** band and do not
+  replace the Claude Code subscription quota. Fleet does not invent a remaining
+  credit balance or infer a budget from spending.
+- [Monthly credits included with Max and Team](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers)
+  appear under **Promotional credits** in Console billing, with their balance and
+  expiry. They renew on your plan's billing date, expire without rollover, and
+  are shared across keys in the linked organization. They are separate from both
+  Claude Code limits and the calendar-month spend report. Fleet does not subtract
+  calendar-month spending from a plan's allowance to claim a remaining balance.
+
+Existing `ANTHROPIC_API_KEY` and `ANTHROPIC_ADMIN_KEY` environment variables also
+work. If both are present, Fleet shows the admin billing report instead of a
+duplicate regular-key connection row. An explicitly enabled paid probe remains
+separate and opt-in.
 
 ### Antigravity when closed
 
@@ -52,11 +91,12 @@ Free usage endpoints — enabled as soon as the variable exists:
 | `minimax` | `MINIMAX_API_KEY` | coding-plan prompts used, window reset |
 | `zai` | `ZAI_API_KEY`, `ZHIPUAI_API_KEY` or `GLM_API_KEY` | token quota and call quota |
 | `litellm` | `LITELLM_API_KEY` + `LITELLM_BASE_URL` | key spend against its budget |
-| `openai-admin` | `OPENAI_ADMIN_KEY` | organisation cost, last 24h |
-| `anthropic-admin` | `ANTHROPIC_ADMIN_KEY` | organisation cost, last 24h |
+| `openai-admin` | `OPENAI_ADMIN_KEY` | organization cost, last 24h |
+| `anthropic` | `ANTHROPIC_API_KEY` or saved key | free connection check and console billing link |
+| `anthropic-admin` | `ANTHROPIC_ADMIN_KEY` or saved key | organization spend this month and today (UTC) |
 
-The two admin entries need an **admin** key, not a normal API key; admin keys
-cannot be used for inference, and normal keys cannot read the cost reports.
+Admin entries need organization billing access; workspace inference keys cannot
+read billing reports. Use the Admin key field for Claude billing credentials.
 
 `zai` uses a console endpoint that is not in Z.AI's public API reference. It can
 change without notice; Fleet falls back to the last cached reading when it does.
@@ -84,7 +124,8 @@ Enable one in `providers.json`:
 ```
 
 Each poll sends one `max_tokens: 1` request — a fraction of a cent at current
-prices, once every 120 seconds per enabled provider. `model` overrides the model
+prices. Automatic polling is paced per provider; Claude API checks use five minutes.
+`model` overrides the model
 Fleet asks for; use it when the default has been retired on your account.
 
 ## config file

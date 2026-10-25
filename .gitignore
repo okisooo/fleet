@@ -18,8 +18,11 @@ _*.png
 .pytest_cache/
 secrets-scan.json
 
-# retired local prototype; only documented provider identifiers are versioned
-native/
+# the native flyout's sources are versioned; its build output is not
+native/*
+!native/FleetPanel/
+native/FleetPanel/bin/
+native/FleetPanel/obj/
 assets/*
 !assets/providers/
 !assets/providers/**

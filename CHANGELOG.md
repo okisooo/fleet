@@ -1,5 +1,34 @@
 # changelog
 
+## 0.3.0 - 2026-10-25
+
+- added Claude API setup to the native flyout, with hidden key entry and Windows
+  Credential Manager storage. existing environment variables retain precedence.
+- regular Claude keys get a free connection check. organization billing keys
+  show today's and calendar-month spending in UTC, with decimal-cent conversion,
+  complete pagination and real zero-spend readings.
+- included Max/Team credits remain separate from subscription limits and local
+  API-price estimates. **Open billing** opens the Console balance and expiry;
+  no remaining promotional balance is invented from calendar-month spend.
+- rebuilt the flyout as a native WPF usage dashboard with slim quota meters,
+  acrylic, provider details, reset times and explicit cached-reading states.
+- added local Claude Code/Codex token history at API list prices, activity,
+  burn rate, cache share and per-model/project details. these are estimates,
+  not subscription charges; compressed Codex archives are not yet indexed.
+- added tray styles, provider visibility, alerts and settings. kept balance-only
+  providers readable in the flyout instead of cycling them through the tray.
+- improved tray recovery, panel lifetime, credential renewal through the clients
+  themselves, and Antigravity's provider-supplied quota groups.
+- prevented rejected keys, replacement keys and old UTC days from reusing
+  misleading billing readings; paced failed requests and honored Retry-After.
+- added the authenticated local loopback usage bridge for T3 Code. API admin keys
+  are not exposed through that bridge.
+- bundled the native panel and linked documentation in portable/installable
+  packages. CI now builds the native panel; release builds include checksums and
+  create drafts for verification before publication.
+- the installer's start-at-sign-in option now defaults to enabled; it can be
+  unchecked during setup. no separate recovery watchdog is installed.
+
 ## 0.2.0 - 2026-08-07
 
 - Rebuilt the flyout around spacious provider cards, full-width quota meters,
