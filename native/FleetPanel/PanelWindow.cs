@@ -709,10 +709,17 @@ namespace FleetPanel
             {
                 return;
             }
-            live.Start(placedLeft, placedTop, placedWidth, placedHeight);
+            var started = false;
             liveFrame = (s, e) =>
             {
-                if (!open || closing || view.Animating || !live.TryTake(ref liveBytes, out var w, out var h, out var lum))
+                if (!open || closing || view.Animating) return;
+                // Screen capture competes with composition; begin it after the entrance.
+                if (!started)
+                {
+                    live.Start(placedLeft, placedTop, placedWidth, placedHeight);
+                    started = true;
+                }
+                if (!live.TryTake(ref liveBytes, out var w, out var h, out var lum))
                 {
                     return;
                 }

@@ -73,9 +73,9 @@ namespace FleetPanel
                     StrongStroke = C(0x72000000), StrongFill = C(0x72000000), OnAccent = C(0xFFFFFFFF),
                     Track = C(0x14000000), Accent = accent,
                     Caution = C(0xFFE08A00), Critical = C(0xFFC42B1C), CautionText = C(0xFF9D5D00), CriticalText = C(0xFFC42B1C),
-                    Shadow = C(0xFF000000), ShadowOpacity = 0.20,
+                    Shadow = C(0xFF172238), ShadowOpacity = 0.15,
                     Fallback = C(0xFFF3F3F3), Luminosity = C(0xFFF9F9F9), Tint = C(0xFFFCFCFC),
-                    LuminosityOpacity = 0.86, TintOpacity = 0.0, Grain = 0.022,
+                    LuminosityOpacity = 0.90, TintOpacity = 0.0, Grain = 0.010,
                 };
             }
             return new Theme
@@ -88,9 +88,9 @@ namespace FleetPanel
                 StrongStroke = C(0x8BFFFFFF), StrongFill = C(0x8BFFFFFF), OnAccent = C(0xFF000000),
                 Track = C(0x1FFFFFFF), Accent = accent,
                 Caution = C(0xFFF7C948), Critical = C(0xFFFF6B78), CautionText = C(0xFFFCE100), CriticalText = C(0xFFFF99A4),
-                Shadow = C(0xFF000000), ShadowOpacity = 0.42,
+                Shadow = C(0xFF000000), ShadowOpacity = 0.32,
                 Fallback = C(0xFF202020), Luminosity = C(0xFF2C2C2C), Tint = C(0xFF2C2C2C),
-                LuminosityOpacity = 0.92, TintOpacity = 0.32, Grain = 0.022,
+                LuminosityOpacity = 0.92, TintOpacity = 0.32, Grain = 0.010,
             };
         }
 

@@ -31,7 +31,9 @@ assembly=Assembly.LoadFile(str(exe.resolve()))
 flags=BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static
 checks=[]
 def call(obj,name,*args):
-    return obj.GetType().GetMethod(name,flags).Invoke(obj,Array[Object](args))
+    method=next(m for m in obj.GetType().GetMethods(flags)
+                if m.Name==name and len(m.GetParameters())==len(args))
+    return method.Invoke(obj,Array[Object](args))
 def field(obj,name):
     return obj.GetType().GetField(name,flags).GetValue(obj)
 def walk(root):
@@ -116,6 +118,23 @@ def verify():
         assert app.Windows.Count==1
         assert not (scratch/'panel-error.log').exists()
         checks.append('closing resets to usage; no extra window or native error')
+        card=field(view,'card');lift=field(view,'lift')
+        for i in range(4):
+            call(parent,'Open');pump(450)
+            assert abs(lift.Y)<0.01 and abs(card.Opacity-1)<0.01
+            assert card.CacheMode is None
+            call(parent,'Close',Boolean(True));pump(200)
+            assert not field(parent,'open') and parent.Left < -10000
+        checks.append('four complete open/close cycles settle opaque, uncached and offscreen')
+        call(parent,'Open');pump(40)
+        call(parent,'Close',Boolean(True));pump(30)
+        call(parent,'Open');pump(450)
+        assert field(parent,'open') and not field(parent,'closing') and abs(card.Opacity-1)<0.01
+        checks.append('rapid close/reopen stays open and restores opacity')
+        call(parent,'Close',Boolean(True));pump(200)
+        assert lift.Y<=12.01 and card.CacheMode is None
+        checks.append('travel is bounded to 12 DIP and no animation cache remains while closed')
+        assert not (scratch/'panel-error.log').exists()
     except Exception as error:
         checks.append('FAILED: '+str(error))
     finally:
