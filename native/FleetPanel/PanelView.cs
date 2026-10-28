@@ -69,6 +69,10 @@ namespace FleetPanel
         private readonly List<Action> tickers = new List<Action>();
         private readonly Dictionary<string, SectionParts> sections = new Dictionary<string, SectionParts>();
         private readonly Dictionary<string, ImageSource> masks = new Dictionary<string, ImageSource>();
+        // Frozen brushes are safe to share, including the small custom drawings.
+        // Bound this cache even if a future theme supplies arbitrary colours.
+        private static readonly Dictionary<Color, SolidColorBrush> brushes = new Dictionary<Color, SolidColorBrush>();
+        private string renderedKey;
         private readonly RotateTransform spin = new RotateTransform();
         private PanelData data = new PanelData();
         private string page = "usage";
@@ -237,7 +241,13 @@ namespace FleetPanel
             }
             // A scheduled data push must not erase a key while the user types.
             if (page == "settings" && apiEditing != "") return;
-            if (apiFeedback == "Key saved. Checking connection…") apiFeedback = "";
+            var feedbackChanged = apiFeedback == "Key saved. Checking connection…";
+            if (feedbackChanged) apiFeedback = "";
+            if (!feedbackChanged && data.ContentKey != null && renderedKey == data.ContentKey)
+            {
+                Tick();
+                return;
+            }
             Rebuild(keepScroll: true);
         }
 
@@ -283,6 +293,7 @@ namespace FleetPanel
 
         private void Rebuild(bool keepScroll = false)
         {
+            renderedKey = data.ContentKey;
             var offset = keepScroll ? scroller.VerticalOffset : 0;
             apiInput?.Clear();
             apiInput = null;
@@ -1806,9 +1817,14 @@ namespace FleetPanel
 
         private static SolidColorBrush Brush(Color color)
         {
-            var brush = new SolidColorBrush(color);
-            brush.Freeze();
-            return brush;
+            lock (brushes)
+            {
+                if (brushes.TryGetValue(color, out var existing)) return existing;
+                var brush = new SolidColorBrush(color);
+                brush.Freeze();
+                if (brushes.Count < 128) brushes[color] = brush;
+                return brush;
+            }
         }
     }
 }

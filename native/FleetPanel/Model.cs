@@ -11,6 +11,9 @@ namespace FleetPanel
     internal sealed class PanelData
     {
         public double Ts;
+        // Compare every field except the collection timestamp. Freshness, account
+        // status and coverage timestamps remain part of the displayed content.
+        public string ContentKey;
         public int Live;
         public int Cached;
         public List<Provider> Providers = new List<Provider>();
@@ -27,7 +30,8 @@ namespace FleetPanel
         public static PanelData Load(string path)
         {
             var text = File.ReadAllText(path);
-            var root = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 }.DeserializeObject(text)
+            var serializer = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
+            var root = serializer.DeserializeObject(text)
                 as Dictionary<string, object>;
             var data = new PanelData();
             if (root == null)
@@ -150,6 +154,8 @@ namespace FleetPanel
                 data.SkippedArchives = Num(coverage, "skipped_zst"); data.LogUpdated = Num(coverage, "updated");
                 data.LogSince = Num(coverage, "since");
             }
+            root.Remove("ts");
+            data.ContentKey = serializer.Serialize(root);
             return data;
         }
 

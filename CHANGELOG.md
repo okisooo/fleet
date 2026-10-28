@@ -1,5 +1,17 @@
 # changelog
 
+## unreleased - panel efficiency
+
+- preserved the installed popup's layout, fonts, themes, controls and navigation.
+- kept controls intact on timestamp-only refreshes and reused frozen brushes.
+- replaced frequent file checks with debounced notifications and a recovery timer.
+- paced live-glass handoff to its 60 Hz capture rate while retaining display-rate
+  entrance and exit motion; stopped capture workers before reopening.
+- bounded panel error logs and closed window-owned timers and capture resources.
+- added reproducible, isolated memory, refresh and navigation checks; see
+  [performance checks](docs/performance.md). collectors and account behavior are
+  unchanged.
+
 ## 0.4.1 - 2026-10-26
 
 - changed **Dashboard** to switch pages inside the existing tray popup. removed

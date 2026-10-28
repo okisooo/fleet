@@ -132,8 +132,8 @@ namespace FleetPanel
 
         private void Release()
         {
-            if (dib != IntPtr.Zero) { Native.DeleteObject(dib); dib = IntPtr.Zero; }
             if (memoryDc != IntPtr.Zero) { Native.DeleteDC(memoryDc); memoryDc = IntPtr.Zero; }
+            if (dib != IntPtr.Zero) { Native.DeleteObject(dib); dib = IntPtr.Zero; }
         }
 
         public void Dispose() => Release();

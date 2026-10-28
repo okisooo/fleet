@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Input;
@@ -40,7 +41,11 @@ namespace FleetPanel
         private readonly ScreenCapture capture = new ScreenCapture();
         // Input priority sits above rendering: a busy high-refresh render loop must
         // never starve the timer that hears the tray and writes the heartbeat.
-        private readonly DispatcherTimer signalTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(100) };
+        private readonly DispatcherTimer signalTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromSeconds(1) };
+        private FileSystemWatcher signals;
+        private int signalQueued;
+        private volatile bool closed;
+        private readonly DispatcherTimer signalDebounce = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(50) };
         private readonly DispatcherTimer clockTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromSeconds(1) };
         private readonly DispatcherTimer dismissTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(90) };
         // Click-away watching only runs while the flyout is open.
@@ -99,6 +104,7 @@ namespace FleetPanel
             dismissTimer.Tick += (s, e) => { dismissTimer.Stop(); if (!IsActive && open) Close(animate: true); };
             KeyDown += (s, e) => { if (e.Key == Key.Escape) Close(animate: true); };
             signalTimer.Tick += (s, e) => OnSignalTick();
+            signalDebounce.Tick += (s, e) => { signalDebounce.Stop(); pendingModel = true; OnSignalTick(); };
             clockTimer.Tick += (s, e) => view.Tick();
             clickTimer.Tick += (s, e) => { if (open && !closing) WatchOutsideClicks(); };
         }
@@ -128,8 +134,50 @@ namespace FleetPanel
             };
             warm.Start();
             signalSeen = Mtime("panel.show");
+            // Native messages remain the normal instant path. File notifications
+            // keep the fallback responsive without checking the disk ten times/s.
+            try
+            {
+                signals = new FileSystemWatcher(cache) { NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite };
+                signals.Changed += SignalChanged;
+                signals.Created += SignalChanged;
+                signals.Renamed += SignalChanged;
+                signals.EnableRaisingEvents = true;
+            }
+            catch (IOException) { signals?.Dispose(); signals = null; }
             signalTimer.Start();
             WriteHeartbeat();
+        }
+
+        private void SignalChanged(object sender, FileSystemEventArgs e)
+        {
+            if (e.Name != "panel.show" && e.Name != "dashboard.show" && e.Name != "panel.quit" && e.Name != "panel.json") return;
+            if (closed || Dispatcher.HasShutdownStarted || Interlocked.Exchange(ref signalQueued, 1) != 0) return;
+            try { Dispatcher.BeginInvoke(new Action(() =>
+            {
+                Interlocked.Exchange(ref signalQueued, 0);
+                if (closed) return;
+                // Create/write/rename can all describe the same request. Let the
+                // writer finish before reading its timestamp and toggling once.
+                signalDebounce.Stop();
+                signalDebounce.Start();
+            }), DispatcherPriority.Input); }
+            catch (InvalidOperationException) { Interlocked.Exchange(ref signalQueued, 0); }
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            closed = true;
+            signals?.Dispose();
+            signalTimer.Stop();
+            signalDebounce.Stop();
+            clockTimer.Stop();
+            dismissTimer.Stop();
+            clickTimer.Stop();
+            StopLiveGlass();
+            view.Rest();
+            capture.Dispose();
+            base.OnClosed(e);
         }
 
         private void BuildView()
@@ -369,7 +417,7 @@ namespace FleetPanel
             catch (Exception exception)
             {
                 modelSeen = stamp;
-                Note("panel.json unreadable: " + exception.Message);
+                Note("panel.json unreadable: " + exception.GetType().Name);
             }
         }
 
@@ -412,13 +460,7 @@ namespace FleetPanel
 
         private void Note(string message)
         {
-            try
-            {
-                File.AppendAllText(PathOf("panel-error.log"), DateTime.Now.ToString("s") + " " + message + Environment.NewLine);
-            }
-            catch (Exception)
-            {
-            }
+            Program.Note(cache, message);
         }
 
         private void Touch(string name)
@@ -699,6 +741,11 @@ namespace FleetPanel
         // UI swaps in the newest copy when nothing is moving, about 0.1 ms. Capture
         // count and cost are logged on close.
         private readonly LiveBackdrop live = new LiveBackdrop();
+        // Capture produces at most 60 frames/s. A permanent Rendering handler
+        // otherwise keeps WPF requesting frames at the monitor's full refresh
+        // rate even when no new pixels arrived. Entrance/exit motion retains
+        // its independent display-rate animation and frame measurement.
+        private readonly DispatcherTimer liveTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromSeconds(1.0 / 60) };
         private EventHandler liveFrame;
         private WriteableBitmap liveBitmap;
         private byte[] liveBytes;
@@ -730,7 +777,8 @@ namespace FleetPanel
                 liveBitmap.WritePixels(new Int32Rect(0, 0, w, h), liveBytes, w * 4, 0);
                 view.SetBackdrop(liveBitmap, lum);
             };
-            CompositionTarget.Rendering += liveFrame;
+            liveTimer.Tick += liveFrame;
+            liveTimer.Start();
         }
 
         private void StopLiveGlass()
@@ -740,7 +788,8 @@ namespace FleetPanel
             {
                 return;
             }
-            CompositionTarget.Rendering -= liveFrame;
+            liveTimer.Stop();
+            liveTimer.Tick -= liveFrame;
             liveFrame = null;
             var captures = live.Captures;
             if (captures > 0)
