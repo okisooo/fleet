@@ -39,8 +39,8 @@ namespace FleetPanel
         // there, and shows as a hard square around the flyout.
         public const double Margin = 28;
         public const double Width = CardWidth + 2 * Margin;
-        public const double Radius = 8;
-        private const double Pad = 16;
+        public const double Radius = 16;
+        private const double Pad = 18;
         // Meters line up under the provider's name, past its icon.
         private const double Indent = 26;
         private const double LabelColumn = 64;
@@ -69,6 +69,10 @@ namespace FleetPanel
         private readonly List<Action> tickers = new List<Action>();
         private readonly Dictionary<string, SectionParts> sections = new Dictionary<string, SectionParts>();
         private readonly Dictionary<string, ImageSource> masks = new Dictionary<string, ImageSource>();
+        // Frozen brushes are safe to share, including the small custom drawings.
+        // Bound this cache even if a future theme supplies arbitrary colours.
+        private static readonly Dictionary<Color, SolidColorBrush> brushes = new Dictionary<Color, SolidColorBrush>();
+        private string renderedKey;
         private readonly RotateTransform spin = new RotateTransform();
         private PanelData data = new PanelData();
         private string page = "usage";
@@ -118,7 +122,7 @@ namespace FleetPanel
                 Background = new SolidColorBrush(theme.Fallback),
                 Effect = new DropShadowEffect
                 {
-                    BlurRadius = 18, ShadowDepth = 7, Direction = 270, Opacity = theme.ShadowOpacity, Color = theme.Shadow,
+                    BlurRadius = 24, ShadowDepth = 5, Direction = 270, Opacity = theme.ShadowOpacity, Color = theme.Shadow,
                     RenderingBias = RenderingBias.Quality,
                 },
                 IsHitTestVisible = false,
@@ -237,7 +241,13 @@ namespace FleetPanel
             }
             // A scheduled data push must not erase a key while the user types.
             if (page == "settings" && apiEditing != "") return;
-            if (apiFeedback == "Key saved. Checking connection…") apiFeedback = "";
+            var feedbackChanged = apiFeedback == "Key saved. Checking connection…";
+            if (feedbackChanged) apiFeedback = "";
+            if (!feedbackChanged && data.ContentKey != null && renderedKey == data.ContentKey)
+            {
+                Tick();
+                return;
+            }
             Rebuild(keepScroll: true);
         }
 
@@ -283,6 +293,7 @@ namespace FleetPanel
 
         private void Rebuild(bool keepScroll = false)
         {
+            renderedKey = data.ContentKey;
             var offset = keepScroll ? scroller.VerticalOffset : 0;
             apiInput?.Clear();
             apiInput = null;
@@ -324,7 +335,6 @@ namespace FleetPanel
             }
             foreach (var provider in data.Providers)
             {
-                content.Children.Add(Divider());
                 content.Children.Add(Section(provider));
             }
             foreach (var item in data.Inactive)
@@ -343,13 +353,15 @@ namespace FleetPanel
         /// <summary>Windows' "Animation effects" switch: off means no motion at all.</summary>
         private static bool Motion => SystemParameters.ClientAreaAnimation;
 
-        /// <summary>Far enough for the whole card to sit below the taskbar's edge.</summary>
-        private double Drop => Math.Max(64, card.ActualHeight + 16);
+        /// <summary>A short travel keeps large popups from sweeping across the screen.</summary>
+        private double Drop => 12;
 
         /// <summary>Before showing: the card waits below the taskbar's edge.</summary>
         public void PrepareIntro()
         {
             lift.BeginAnimation(TranslateTransform.YProperty, null);
+            card.BeginAnimation(UIElement.OpacityProperty, null);
+            card.Opacity = Motion ? 0 : 1;
             lift.Y = Motion ? Drop : 0;
         }
 
@@ -360,11 +372,19 @@ namespace FleetPanel
             {
                 lift.BeginAnimation(TranslateTransform.YProperty, null);
                 lift.Y = 0;
+                card.Opacity = 1;
+                card.CacheMode = null;
                 IntroMeasured?.Invoke("frames=0 motion=off");
                 return;
             }
-            busyUntil = DateTime.UtcNow.AddMilliseconds(360);
-            lift.BeginAnimation(TranslateTransform.YProperty, Anim(Drop, 0, 330, 0, Decelerate));
+            busyUntil = DateTime.UtcNow.AddMilliseconds(220);
+            // Cache the whole surface only during travel: nested blur/shadow layers
+            // should not be recomposed at every animation frame. Text is live at rest.
+            card.CacheMode = new BitmapCache { SnapsToDevicePixels = true };
+            var entrance = Anim(lift.Y, 0, 200, 0, Decelerate);
+            entrance.Completed += (s, e) => card.CacheMode = null;
+            lift.BeginAnimation(TranslateTransform.YProperty, entrance);
+            card.BeginAnimation(UIElement.OpacityProperty, Anim(card.Opacity, 1, 150, 0, Decelerate));
             var started = DateTime.UtcNow;
             var frames = new List<TimeSpan>();
             if (counting != null)
@@ -411,6 +431,7 @@ namespace FleetPanel
         /// <summary>Stop everything that runs per frame: nothing renders while closed.</summary>
         public void Rest()
         {
+            card.CacheMode = null;
             spin.BeginAnimation(RotateTransform.AngleProperty, null);
             spin.Angle = 0;
             if (counting != null)
@@ -423,8 +444,10 @@ namespace FleetPanel
         /// <summary>The close: the card drops back into the taskbar, speeding up as it goes.</summary>
         public void PlayOutro(Action finished)
         {
-            busyUntil = DateTime.UtcNow.AddMilliseconds(220);
-            var drop = Anim(lift.Y, Drop, 190, 0, Accelerate);
+            busyUntil = DateTime.UtcNow.AddMilliseconds(140);
+            card.CacheMode = new BitmapCache { SnapsToDevicePixels = true };
+            card.BeginAnimation(UIElement.OpacityProperty, Anim(card.Opacity, 0, 110, 0, Accelerate));
+            var drop = Anim(lift.Y, Drop, 120, 0, Accelerate);
             drop.Completed += (s, e) => finished();
             lift.BeginAnimation(TranslateTransform.YProperty, drop);
         }
@@ -447,7 +470,7 @@ namespace FleetPanel
 
         private UIElement Header(string title, bool back)
         {
-            var grid = new Grid { Height = 40 };
+            var grid = new Grid { Height = 46 };
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -457,7 +480,9 @@ namespace FleetPanel
                 button.Margin = new Thickness(-8, 0, 4, 0);
                 left.Children.Add(button);
             }
-            left.Children.Add(Text(title, 14, theme.Text, FontWeights.SemiBold));
+            if (!back)
+                left.Children.Add(new Border { Width = 6, Height = 18, CornerRadius = new CornerRadius(3), Background = Brush(theme.Accent), Margin = new Thickness(0, 0, 8, 0) });
+            left.Children.Add(Text(title, 16, theme.Text, FontWeights.SemiBold));
             grid.Children.Add(left);
             if (!back || page == "dashboard")
             {
@@ -498,7 +523,7 @@ namespace FleetPanel
                 note.Margin = new Thickness(0, 0, 0, 10);
                 return note;
             }
-            var grid = new Grid { Margin = new Thickness(0, 2, 0, 12), ToolTip = CostNote, Background = Brushes.Transparent };
+            var grid = new Grid { Margin = new Thickness(12, 12, 12, 12), ToolTip = CostNote, Background = Brushes.Transparent };
             ToolTipService.SetInitialShowDelay(grid, 400);
             var cells = new[]
             {
@@ -510,14 +535,14 @@ namespace FleetPanel
             {
                 grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(i == 0 ? 1.25 : 1, GridUnitType.Star) });
                 var cell = new StackPanel();
-                cell.Children.Add(Text(cells[i].Item1, 12, theme.TextSecondary));
-                var value = Text(cells[i].Item2 == null ? "—" : Format.Money(cells[i].Item2.Value), 20, theme.Text, FontWeights.SemiBold, tabular: true);
+                cell.Children.Add(Text(cells[i].Item1, 11, theme.TextSecondary));
+                var value = Text(cells[i].Item2 == null ? "—" : Format.Money(cells[i].Item2.Value), 20, i == 0 ? theme.Accent : theme.Text, FontWeights.SemiBold, tabular: true);
                 value.Margin = new Thickness(0, 1, 0, 0);
                 cell.Children.Add(value);
                 Grid.SetColumn(cell, i);
                 grid.Children.Add(cell);
             }
-            return grid;
+            return new Border { Child = grid, CornerRadius = new CornerRadius(12), Background = Brush(Theme.WithAlpha(theme.Accent, theme.Light ? 0.07 : 0.10)), Margin = new Thickness(0, 2, 0, 12) };
         }
 
         private Border Divider() => new Border
@@ -581,17 +606,17 @@ namespace FleetPanel
             var hit = new Border
             {
                 Child = summary,
-                Padding = new Thickness(8, 7, 8, 7),
-                Margin = new Thickness(-8, 0, -8, 0),
-                CornerRadius = new CornerRadius(6),
-                Background = Brushes.Transparent,
+                Padding = new Thickness(10, 10, 10, 10),
+                Margin = new Thickness(0, 0, 0, 7),
+                CornerRadius = new CornerRadius(11),
+                Background = Brush(theme.ControlFill),
             };
             if (expandable)
             {
                 hit.Cursor = Cursors.Hand;
                 AutomationName(hit, p.Name + (open ? ", details shown" : ", show details"));
-                hit.MouseEnter += (s, e) => hit.Background = Brush(theme.Hover);
-                hit.MouseLeave += (s, e) => hit.Background = Brushes.Transparent;
+                hit.MouseEnter += (s, e) => hit.Background = Brush(theme.ControlHover);
+                hit.MouseLeave += (s, e) => hit.Background = Brush(theme.ControlFill);
                 OnClick(hit, () => Toggle(p.Id));
             }
 
@@ -1792,9 +1817,14 @@ namespace FleetPanel
 
         private static SolidColorBrush Brush(Color color)
         {
-            var brush = new SolidColorBrush(color);
-            brush.Freeze();
-            return brush;
+            lock (brushes)
+            {
+                if (brushes.TryGetValue(color, out var existing)) return existing;
+                var brush = new SolidColorBrush(color);
+                brush.Freeze();
+                if (brushes.Count < 128) brushes[color] = brush;
+                return brush;
+            }
         }
     }
 }

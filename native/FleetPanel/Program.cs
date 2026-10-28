@@ -56,14 +56,9 @@ namespace FleetPanel
                 // A fault in the flyout leaves a note for the tray log instead of vanishing.
                 app.DispatcherUnhandledException += (s, e) =>
                 {
-                    try
-                    {
-                        File.AppendAllText(Path.Combine(cache, "panel-error.log"),
-                            DateTime.Now.ToString("s") + " " + e.Exception + Environment.NewLine);
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    // Exception messages may include input. Keep type and stack,
+                    // never credential text, and bound both the entry and the file.
+                    Note(cache, e.Exception.GetType().FullName + Environment.NewLine + e.Exception.StackTrace);
                 };
                 WatchParent(app);
                 var window = new PanelWindow(cache);
@@ -77,6 +72,23 @@ namespace FleetPanel
         {
             var i = Array.IndexOf(args, name);
             return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        internal static void Note(string cache, string message)
+        {
+            try
+            {
+                var path = Path.Combine(cache, "panel-error.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 64 * 1024)
+                {
+                    var previous = path + ".previous";
+                    if (File.Exists(previous)) File.Delete(previous);
+                    File.Move(path, previous);
+                }
+                if (message.Length > 4096) message = message.Substring(0, 4096);
+                File.AppendAllText(path, DateTime.Now.ToString("s") + " " + message + Environment.NewLine);
+            }
+            catch (Exception) { }
         }
 
         /// <summary>No orphan flyout: leave when the tray that started us is gone.</summary>

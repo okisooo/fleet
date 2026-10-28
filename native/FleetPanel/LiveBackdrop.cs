@@ -16,6 +16,7 @@ namespace FleetPanel
         private readonly object gate = new object();
         private Thread thread;
         private volatile bool running;
+        private readonly ManualResetEventSlim stopping = new ManualResetEventSlim(false);
         private int left, top, width, height;
         private byte[] frame;
         private int frameWidth, frameHeight;
@@ -41,6 +42,7 @@ namespace FleetPanel
                 totalMs = 0;
             }
             running = true;
+            stopping.Reset();
             thread = new Thread(Run) { IsBackground = true, Name = "fleet-glass" };
             thread.Start();
         }
@@ -56,7 +58,15 @@ namespace FleetPanel
             }
         }
 
-        public void Stop() => running = false;
+        public void Stop()
+        {
+            running = false;
+            stopping.Set();
+            // A new open must not revive the previous worker before it exits.
+            // Wake its paced wait immediately; only an in-flight copy can remain.
+            thread?.Join();
+            thread = null;
+        }
 
         /// <summary>The newest frame, if one arrived since the last call.</summary>
         public bool TryTake(ref byte[] target, out int w, out int h, out double lum)
@@ -100,7 +110,7 @@ namespace FleetPanel
                     }
                     if (w <= 0 || h <= 0)
                     {
-                        Thread.Sleep(16);
+                        stopping.Wait(16);
                         continue;
                     }
                     var cw = Math.Max(1, w / ScreenCapture.Downscale);
@@ -128,7 +138,7 @@ namespace FleetPanel
                     clock.Stop();
                     if (!ok)
                     {
-                        Thread.Sleep(16);
+                        stopping.Wait(16);
                         continue;
                     }
                     // Sixty copies a second while something behind moves: under a blur that
@@ -144,7 +154,7 @@ namespace FleetPanel
                     }
                     if (rest >= 1)
                     {
-                        Thread.Sleep((int)Math.Ceiling(rest));
+                        stopping.Wait((int)Math.Ceiling(rest));
                     }
                     lock (gate)
                     {
@@ -174,15 +184,17 @@ namespace FleetPanel
 
         private static void Free(ref IntPtr dc, ref IntPtr dib)
         {
-            if (dib != IntPtr.Zero)
-            {
-                Native.DeleteObject(dib);
-                dib = IntPtr.Zero;
-            }
+            // Release the DC's selection before deleting its bitmap. GDI refuses
+            // DeleteObject while the bitmap is still selected into a live DC.
             if (dc != IntPtr.Zero)
             {
                 Native.DeleteDC(dc);
                 dc = IntPtr.Zero;
+            }
+            if (dib != IntPtr.Zero)
+            {
+                Native.DeleteObject(dib);
+                dib = IntPtr.Zero;
             }
         }
     }
