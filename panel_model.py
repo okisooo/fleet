@@ -32,6 +32,7 @@ def _assets_dir():
 ICONS = {
     "claude": "claude.png",
     "claude api": "claude.png",
+    "claude api backup": "claude.png",
     "codex": "codex.png",
     "grok": "grok.ico",
     "antigrav": "antigravity.png",
