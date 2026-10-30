@@ -9,7 +9,9 @@ import ctypes
 import os
 from ctypes import wintypes
 
-TARGETS = {name: "Fleet/api/" + name for name in ("anthropic", "anthropic-admin")}
+ACCOUNT_PAIRS = (("anthropic", "anthropic-admin"),
+                 ("anthropic-backup", "anthropic-backup-admin"))
+TARGETS = {name: "Fleet/api/" + name for pair in ACCOUNT_PAIRS for name in pair}
 
 
 class _Credential(ctypes.Structure):

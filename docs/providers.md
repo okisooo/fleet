@@ -46,6 +46,19 @@ replaces a saved key; **Remove** removes only Fleet's saved credential. The key
 stays in the current Windows user's Credential Manager (`Fleet/api/anthropic`
 or `Fleet/api/anthropic-admin`). Fleet refreshes after saving or removing it.
 
+For a second organization, use **Backup API key** and **Backup admin key** on
+the same Settings page. These use separate Windows Credential Manager entries,
+`Fleet/api/anthropic-backup` and `Fleet/api/anthropic-backup-admin`, and appear
+as **Claude API backup** alongside the main account. Their environment-variable
+equivalents are `ANTHROPIC_BACKUP_API_KEY` and `ANTHROPIC_BACKUP_ADMIN_KEY`.
+Each organization needs its own admin key for its own spending report. Saving
+a backup key in Fleet only enables monitoring; application inference failover
+must be configured in the application that makes the requests. Credits remain
+separate at Anthropic and are not merged by Fleet.
+Fleet shows spending, not either organization's remaining included-credit
+balance. **Open billing** opens the Console's currently selected organization;
+switch organizations there to view the backup balance and expiry.
+
 - A regular key uses a free `GET /v1/models` connection check. **Open billing**
   opens the Claude Console to view prepaid credits. No inference request is sent.
 - An organization billing credential shows month-to-date and today's spend, in

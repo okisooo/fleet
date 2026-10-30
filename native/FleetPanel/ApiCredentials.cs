@@ -30,7 +30,7 @@ namespace FleetPanel
 
         public static string Save(string id, string key)
         {
-            if (id != "anthropic" && id != "anthropic-admin") return "Unknown account.";
+            if (!KnownAccount(id)) return "Unknown account.";
             key = (key ?? "").Trim();
             if (key.Length == 0 || key.Length > 1024 || Array.Exists(key.ToCharArray(), char.IsWhiteSpace))
                 return "Enter a valid key without spaces.";
@@ -57,9 +57,12 @@ namespace FleetPanel
 
         public static string Remove(string id)
         {
-            if (id != "anthropic" && id != "anthropic-admin") return "Unknown account.";
+            if (!KnownAccount(id)) return "Unknown account.";
             return CredDelete("Fleet/api/" + id, 1, 0) || Marshal.GetLastWin32Error() == 1168
                 ? "" : "Windows could not remove the key. Try again.";
         }
+
+        private static bool KnownAccount(string id) => id == "anthropic" || id == "anthropic-admin"
+            || id == "anthropic-backup" || id == "anthropic-backup-admin";
     }
 }

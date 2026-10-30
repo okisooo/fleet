@@ -1420,7 +1420,7 @@ def collect_api_keys(specs=None):
 # Refresh now (force) bypasses the pacing but not a provider's own backoff.
 # Anthropic throttles its usage endpoint at about one call a minute; three is safe.
 PACE = {"api_claude": 180, "api_codex": 30, "api_grok": 60, "api_antigravity": 15, "api_key": 60,
-        "api_key:anthropic-admin": 300, "api_key:anthropic": 300}
+        **{"api_key:" + pid: 300 for pid in apikeys.api_credentials.TARGETS}}
 _LIVE = {}
 _LIVE_LOCK = threading.Lock()
 
@@ -1430,12 +1430,12 @@ def _paced(key, fetch, force=False):
     with _LIVE_LOCK:
         last = _LIVE.get(key)
     pace = PACE.get(key, PACE["api_key"])
-    if last and not force:
+    if last:
         previous = json.loads(last[1])
-        if now - last[0] < pace or (previous.get("retry_at") or 0) > time.time():
+        if (previous.get("retry_at") or 0) > time.time() or (not force and now - last[0] < pace):
             return previous
     result = fetch()
-    if key in ("api_key:anthropic", "api_key:anthropic-admin") or (
+    if (key.startswith("api_key:") and key[len("api_key:"):] in apikeys.api_credentials.TARGETS) or (
         result.get("metrics") and not result.get("err") and not result.get("cached_at")
     ):
         with _LIVE_LOCK:

@@ -1189,6 +1189,8 @@ namespace FleetPanel
             stack.Children.Add(apiNote);
             stack.Children.Add(ApiKeyRow("anthropic", "API key"));
             stack.Children.Add(ApiKeyRow("anthropic-admin", "Admin key"));
+            stack.Children.Add(ApiKeyRow("anthropic-backup", "Backup API key"));
+            stack.Children.Add(ApiKeyRow("anthropic-backup-admin", "Backup admin key"));
             var billingLink = Button("Open billing", "View included credits and expiry in Console; no saved key required",
                 () => ActionClicked?.Invoke("anthropic-billing"));
             billingLink.Margin = new Thickness(0, 6, 0, 0);

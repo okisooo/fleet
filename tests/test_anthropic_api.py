@@ -219,11 +219,64 @@ class AnthropicApiTests(unittest.TestCase):
             fleet._paced("api_key:anthropic-admin", fetch)
         self.assertEqual(fetch.call_count, 1)
 
+    def test_backup_failure_and_empty_reports_keep_the_five_minute_pace(self):
+        for pid in ("anthropic-backup", "anthropic-backup-admin"):
+            for result in ({"metrics": [], "err": "key rejected"}, {"metrics": [], "err": ""}):
+                with self.subTest(pid=pid, result=result), mock.patch.object(fleet, "_LIVE", {}):
+                    fetch = mock.Mock(return_value=result)
+                    with mock.patch.object(fleet.time, "monotonic", side_effect=[0, 299, 301]):
+                        fleet._paced("api_key:" + pid, fetch)
+                        fleet._paced("api_key:" + pid, fetch)
+                        self.assertEqual(fetch.call_count, 1)
+                        fleet._paced("api_key:" + pid, fetch)
+                        self.assertEqual(fetch.call_count, 2)
+
+    def test_backup_retry_after_is_honored_even_by_manual_refresh(self):
+        for pid in ("anthropic-backup", "anthropic-backup-admin"):
+            with self.subTest(pid=pid), mock.patch.object(fleet, "_LIVE", {}):
+                fetch = mock.Mock(return_value={"metrics": [], "err": "rate limited", "retry_at": NOW + 600})
+                with mock.patch.object(fleet.time, "monotonic", side_effect=[0, 400, 450]):
+                    fleet._paced("api_key:" + pid, fetch)
+                    fleet._paced("api_key:" + pid, fetch)
+                    fleet._paced("api_key:" + pid, fetch, force=True)
+                self.assertEqual(fetch.call_count, 1)
+
     def test_setup_metadata_honors_remapped_and_disabled_providers(self):
         config = {"providers": {"anthropic-admin": {"env": "WORK_BILLING_KEY", "enabled": False}}}
         with mock.patch.dict(os.environ, {"WORK_BILLING_KEY": KEY}):
             metadata = apikeys.account_status(config)
         self.assertEqual(metadata[1], {"id": "anthropic-admin", "source": "environment", "enabled": False})
+
+    def test_both_organizations_have_independent_reporting_slots(self):
+        keys = {"anthropic-admin": "main-fixture", "anthropic-backup-admin": "backup-fixture"}
+        with mock.patch.object(apikeys.api_credentials, "read", side_effect=keys.get):
+            specs = apikeys.enabled_specs({})
+            accounts = apikeys.account_status()
+        self.assertEqual({s["id"] for s in specs}, set(keys))
+        self.assertEqual(len({s["label"] for s in specs}), 2)
+        self.assertEqual({a["id"] for a in accounts if a["source"] == "windows"}, set(keys))
+        self.assertNotEqual(apikeys.api_credentials.TARGETS["anthropic-admin"],
+                            apikeys.api_credentials.TARGETS["anthropic-backup-admin"])
+
+    def test_main_reporting_key_does_not_hide_backup_connection(self):
+        keys = {"anthropic-admin": "main-fixture", "anthropic-backup": "backup-fixture"}
+        with mock.patch.object(apikeys.api_credentials, "read", side_effect=keys.get):
+            specs = apikeys.enabled_specs({})
+        self.assertEqual({s["id"] for s in specs}, set(keys))
+        self.assertTrue(next(s for s in specs if s["id"] == "anthropic-backup")["connection_only"])
+
+    def test_backup_zero_spend_is_preserved_without_exposing_credentials(self):
+        spec = apikeys.BUILTIN_BY_ID["anthropic-backup-admin"]
+        with mock.patch.dict(os.environ, {"ANTHROPIC_BACKUP_ADMIN_KEY": KEY}):
+            out = apikeys.collect(spec, lambda *a, **kw: (200, {}, b'{"data": []}'), fleet._header, fleet.M)
+        model = panel_model.build([out], NOW, accounts=[
+            {"id": "anthropic-backup-admin", "source": "windows", "unexpected": KEY}])
+        self.assertNotIn(KEY, json.dumps(model))
+        self.assertEqual(model["providers"][0]["id"], "anthropic-backup-admin")
+        self.assertEqual(model["providers"][0]["account"]["mode"], "spend")
+        self.assertEqual(out["metrics"][0]["extra"], "$0.00")
+        self.assertEqual(model["api_accounts"], [
+            {"id": "anthropic-backup-admin", "source": "windows", "enabled": True}])
 
     def test_account_metadata_is_allowlisted_and_does_not_join_local_api_estimates(self):
         out, _ = self.collect([{"data": []}])

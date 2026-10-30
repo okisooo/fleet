@@ -1,5 +1,14 @@
 # changelog
 
+## unreleased - backup API organization
+
+- added separate main and backup Claude API credentials and spending rows in
+  the existing popup. Keys stay in Windows Credential Manager, with separate
+  cache identities for each account.
+- kept ordinary inference-key connection checks separate from admin-key cost
+  reports. Fleet monitors the accounts; it does not route bot inference or
+  combine their credit balances.
+
 ## unreleased - panel efficiency
 
 - preserved the installed popup's layout, fonts, themes, controls and navigation.

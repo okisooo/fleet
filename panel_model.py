@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import fleet
+import api_credentials
 
 SCHEMA = 4
 
@@ -456,7 +457,7 @@ def _inactive(agent):
     raw = agent.get("agent") or "Unknown"
     name = NAMES.get(raw, raw)
     reason = str(agent.get("err") or agent.get("_inert") or "not active").strip()
-    if agent.get("api_id") in ("anthropic", "anthropic-admin"):
+    if agent.get("api_id") in api_credentials.TARGETS:
         label, tooltip, action = reason[:1].upper() + reason[1:], reason, "api-settings"
     elif _needs_sign_in(agent):
         label, tooltip, action = (
@@ -558,7 +559,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                 "meters": _meters(groups),
                 "spend": _spend(pid, shown, usage) if cost_on else None,
                 "account": {"mode": agent["account"]["mode"]}
-                if pid in ("anthropic", "anthropic-admin") and isinstance(agent.get("account"), dict)
+                if pid in api_credentials.TARGETS and isinstance(agent.get("account"), dict)
                 and agent["account"].get("mode") in ("spend", "connection") else None,
             })
         elif (agent.get("err") or inert) and agent.get("known", True):
@@ -586,7 +587,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                      for key in ("files", "pending_files", "skipped_zst", "updated", "since")}
                     if cost_on and usage else None,
         "api_accounts": [{"id": item["id"], "source": item.get("source", ""), "enabled": item.get("enabled") is not False}
-                         for item in (accounts or []) if item.get("id") in ("anthropic", "anthropic-admin")
+                         for item in (accounts or []) if item.get("id") in api_credentials.TARGETS
                          and item.get("source", "") in ("", "windows", "environment")],
         "summary": _summary(usage, settings),
         "settings": {key: settings[key] for key in ("units", "tray_icon", "alerts", "cost") if key in settings},

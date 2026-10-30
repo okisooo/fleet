@@ -290,6 +290,7 @@ ASSETS_DIR = HERE / "assets" / "providers"
 PROVIDER_ASSETS = {
     "claude": "claude.png",
     "anthropic": "claude.png",
+    "anthropicbackup": "claude.png",
     "anthropicorg": "claude.png",
     "codex": "codex.png",
     "openai": "codex.png",

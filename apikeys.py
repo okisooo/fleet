@@ -18,6 +18,7 @@ puts keys in JSON or logs; config holds variable *names*, not secrets.
 from __future__ import annotations
 
 import hashlib
+import copy
 import email.utils
 import json
 import os
@@ -352,6 +353,13 @@ BUILTIN.append({
     "metrics": [],
 })
 
+for _source_id, _backup_id, _backup_env in (
+    ("anthropic", "anthropic-backup", "ANTHROPIC_BACKUP_API_KEY"),
+    ("anthropic-admin", "anthropic-backup-admin", "ANTHROPIC_BACKUP_ADMIN_KEY"),
+):
+    _source = next(spec for spec in BUILTIN if spec["id"] == _source_id)
+    BUILTIN.append(dict(copy.deepcopy(_source), id=_backup_id, label="Claude API backup", env=[_backup_env]))
+
 BUILTIN_BY_ID = {spec["id"]: spec for spec in BUILTIN}
 
 
@@ -438,7 +446,7 @@ def account_status(config=None):
     if not isinstance(settings, dict):
         settings = {}
     out = []
-    for pid in ("anthropic", "anthropic-admin"):
+    for pid in api_credentials.TARGETS:
         user = settings.get(pid) or {}
         if not isinstance(user, dict):
             user = {}
@@ -515,18 +523,21 @@ def enabled_specs(config, environ=None):
         wants_probe = bool(user.get("probe"))
         if user.get("enabled") is False or not has_key:
             continue
-        if spec.get("probe") and not wants_probe and spec["id"] != "anthropic":
+        inference_ids = {pair[0] for pair in api_credentials.ACCOUNT_PAIRS}
+        if spec.get("probe") and not wants_probe and spec["id"] not in inference_ids:
             continue
         merged = dict(spec)
         merged["env"] = names
         merged["_settings"] = user
-        if spec["id"] == "anthropic" and not wants_probe:
+        if spec["id"] in inference_ids and not wants_probe:
             merged["connection_only"] = True
         out.append(merged)
     # Both credentials describe the same account. Prefer its billing report;
     # keep an explicitly enabled rate-limit probe as a separate opt-in signal.
-    if any(spec["id"] == "anthropic-admin" for spec in out):
-        out = [spec for spec in out if not spec.get("connection_only")]
+    for inference_id, admin_id in api_credentials.ACCOUNT_PAIRS:
+        if any(spec["id"] == admin_id for spec in out):
+            out = [spec for spec in out
+                   if not (spec["id"] == inference_id and spec.get("connection_only"))]
     for index, entry in enumerate(config.get("custom") or []):
         spec = normalize_custom(entry, index)
         if spec:
