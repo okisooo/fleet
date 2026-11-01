@@ -139,7 +139,9 @@ def _row(metric, label=None, window=None, scoped=False):
 
 
 def _icon(raw_name):
-    path = _assets_dir() / ICONS.get(str(raw_name).casefold(), f"{str(raw_name).casefold()}.png")
+    name = str(raw_name).casefold()
+    # Another Claude sign-in is named after its account ("Claude OXO").
+    path = _assets_dir() / ICONS.get(name, "claude.png" if name.startswith("claude") else f"{name}.png")
     return str(path) if path.exists() else None
 
 
@@ -151,7 +153,7 @@ def _mark(name):
     return "".join(letters[:2]).upper() or "?"
 
 
-def _groups(name, metrics):
+def _groups(name, metrics, scoped=False):
     if name == "Antigravity" and any(metric.get("group") for metric in metrics):
         groups, by_title = [], {}
         for metric in metrics:
@@ -171,7 +173,7 @@ def _groups(name, metrics):
                 groups.append({"title": title, "rows": rows})
         if groups:
             return groups
-    scoped = name == "Claude"
+    scoped = scoped or name == "Claude"
     return [{"title": None, "rows": [_row(metric, scoped=scoped) for metric in metrics]}]
 
 
@@ -528,7 +530,8 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                 # Old numbers behind a dead login help nobody: offer the fix instead.
                 inactive.append(_inactive(dict(agent, cached_at=None)))
                 continue
-            groups = _groups(name, shown)
+            claude = agent.get("family") == "claude"
+            groups = _groups(name, shown, claude)
             for group in groups:
                 for row in group["rows"]:
                     row.update(_pace(row, now))
@@ -540,7 +543,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
             rows = [row for group in groups for row in group["rows"]]
             rings = _rings(name, groups)
             balance = None if rings else _balance(rows)
-            all_groups = groups if all_shown is shown else _groups(name, all_shown)
+            all_groups = groups if all_shown is shown else _groups(name, all_shown, claude)
             if all_groups is not groups:
                 for group in all_groups:
                     for row in group["rows"]:

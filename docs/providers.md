@@ -6,6 +6,8 @@ Fleet shows two kinds of provider:
   from the CLI/app state already on the machine. Nothing to configure.
   Codex and Claude also show a **Resets** row while a free usage-limit reset
   is waiting; redeem it in Codex (`/usage`) or Claude Code.
+  Another Claude account set up in T3 Code (a Claude Agent instance with its
+  own home folder) shows as its own card, under the instance's name.
 - **public API keys** — an environment variable, or a Claude key saved through
   Settings. Each adds its own row to the flyout.
 

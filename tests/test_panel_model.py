@@ -28,6 +28,20 @@ class PanelModelTests(unittest.TestCase):
         self.assertEqual(provider["kind"], "rings")
         self.assertIsNone(provider["balance"])
 
+    def test_a_second_claude_account_is_its_own_card_with_claude_labels(self):
+        model = self.build([
+            {"agent": "Claude", "family": "claude", "plan": "Max 20x", "err": "", "metrics": [_metric("Weekly", 40.0)]},
+            {"agent": "Claude OXO", "family": "claude", "plan": "Max 5x", "err": "", "metrics": [
+                _metric("Weekly", 10.0), _metric("Fable", 5.0)]},
+        ])
+        first, second = model["providers"]
+        self.assertEqual([(p["id"], p["name"], p["plan"]) for p in (first, second)],
+                         [("claude", "Claude", "Max 20x"), ("claude oxo", "Claude OXO", "Max 5x")])
+        self.assertEqual(second["icon"], first["icon"])
+        self.assertIsNotNone(second["icon"])
+        self.assertIn("Fable weekly limit", [r["label"] for g in second["groups"] for r in g["rows"]])
+        self.assertEqual([k["id"] for k in model["known"]], ["claude", "claude oxo"])
+
     def test_antigravity_quotas_are_grouped_by_model_family(self):
         model = self.build([{
             "agent": "Antigrav", "plan": "Google AI Pro", "err": "", "metrics": [
