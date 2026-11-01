@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1283,6 +1284,63 @@ class CodexWindowTests(unittest.TestCase):
             fleet._codex_credit_metric(6.5),
             fleet.M("Credits", None, None, "$6.5"),
         )
+
+
+class UsageResetTests(unittest.TestCase):
+    """Free usage-limit resets show as one "Resets" row for Codex and Claude."""
+
+    def setUp(self):
+        fleet._CODEX_RESET_DETAIL.update(count=None, at=0.0, expires=None)
+
+    def test_codex_reset_count_and_expiry(self):
+        end = time.time() + 20 * 86400
+        detail = {"credits": [
+            {"status": "available", "is_supported_by_plan": True, "expires_at": end},
+            {"status": "redeemed", "expires_at": end - 86400},
+        ], "available_count": 1}
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)) as get:
+            metric = fleet._codex_resets_metric({"available_count": 1, "applicable_available_count": 0}, "tok", {})
+            again = fleet._codex_resets_metric({"available_count": 1}, "tok", {})
+        self.assertEqual(metric, fleet.M("Resets", None, None, f"1 available · until {fleet._day(end)}"))
+        self.assertEqual(again, metric)
+        self.assertEqual(get.call_count, 1)  # the detail is cached between polls
+
+    def test_codex_without_resets_has_no_row_and_no_extra_request(self):
+        with mock.patch.object(fleet, "_jget") as get:
+            self.assertIsNone(fleet._codex_resets_metric({"available_count": 0}, "tok", {}))
+            self.assertIsNone(fleet._codex_resets_metric(None, "tok", {}))
+        get.assert_not_called()
+
+    def test_codex_count_survives_a_failed_detail_request(self):
+        with mock.patch.object(fleet, "_jget", return_value=(500, {}, None)):
+            self.assertEqual(fleet._codex_resets_metric({"available_count": 2}, "tok", {}),
+                             fleet.M("Resets", None, None, "2 available"))
+
+    def test_claude_grants_add_up_and_skip_paused_or_ended(self):
+        now = 1_800_000_000
+        iso = lambda ts: datetime.fromtimestamp(ts, timezone.utc).isoformat()
+        payload = {"cedar_ember": {"eligible": True, "grants": [
+            {"id": "a", "resets_left": 1, "ends_at": iso(now + 9 * 86400)},
+            {"id": "b", "resets_left": 2, "ends_at": iso(now + 3 * 86400)},
+            {"id": "c", "resets_left": 4, "paused": True},
+            {"id": "d", "resets_left": 5, "ends_at": iso(now - 60)},
+        ]}}
+        metric = fleet._claude_resets_metric(payload, now=now)
+        self.assertEqual(metric["extra"], f"3 available · until {fleet._day(now + 3 * 86400)}")
+
+    def test_claude_without_resets_has_no_row(self):
+        self.assertIsNone(fleet._claude_resets_metric({"cedar_ember": None, "juniper_tide": None}))
+        self.assertIsNone(fleet._claude_resets_metric(
+            {"cedar_ember": {"eligible": False, "ineligible_reason": "surface", "grants": []}}))
+
+    def test_claude_weekly_five_hour_reset(self):
+        now = 1_800_000_000
+        self.assertEqual(fleet._claude_resets_metric(
+            {"juniper_tide": {"eligible": True, "available": True}}, now=now)["extra"], "5-hour ready")
+        back = datetime.fromtimestamp(now + 2 * 86400, timezone.utc).isoformat()
+        self.assertEqual(fleet._claude_resets_metric(
+            {"juniper_tide": {"eligible": True, "available": False, "next_available_at": back}}, now=now)["extra"],
+            f"5-hour back {fleet._day(now + 2 * 86400)}")
 
 
 class PanelDismissalTests(unittest.TestCase):

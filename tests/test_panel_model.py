@@ -15,6 +15,19 @@ class PanelModelTests(unittest.TestCase):
         json.dumps(model)  # the native panel reads it as plain JSON
         return model
 
+    def test_a_waiting_reset_shows_in_the_closed_section_and_the_table(self):
+        model = self.build([{
+            "agent": "Codex", "plan": "pro", "err": "", "metrics": [
+                _metric("Weekly", 24.0, 1000.0 + 86400), _metric("Resets", None, None, "1 available · until Nov 30"),
+            ],
+        }])
+        provider = model["providers"][0]
+        self.assertEqual([(m["short"], m["value"]) for m in provider["meters"]],
+                         [("Weekly", "24%"), ("Resets", "1 available · until Nov 30")])
+        self.assertIn("Resets", [r["label"] for g in provider["groups"] for r in g["rows"]])
+        self.assertEqual(provider["kind"], "rings")
+        self.assertIsNone(provider["balance"])
+
     def test_antigravity_quotas_are_grouped_by_model_family(self):
         model = self.build([{
             "agent": "Antigrav", "plan": "Google AI Pro", "err": "", "metrics": [

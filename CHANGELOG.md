@@ -1,5 +1,16 @@
 # changelog
 
+## unreleased - usage-limit resets
+
+- Codex and Claude now show a **Resets** row when a free usage-limit reset is
+  waiting, with how many and when the soonest one expires ("1 available ·
+  until Dec 1"). It sits under the provider's meters without opening the
+  section. Codex reports the count in every usage reply; the expiry is read
+  from its reset-credit list at most every 15 minutes, only while resets
+  exist. Claude's resets come from the block its usage endpoint adds when
+  asked with `cedar_ember=1`, the same request Claude Code's own usage menu
+  makes. Fleet only reads them; redeem a reset in Codex or Claude Code.
+
 ## unreleased - backup API organization
 
 - added separate main and backup Claude API credentials and spending rows in

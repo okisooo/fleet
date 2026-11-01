@@ -245,6 +245,7 @@ def _rings(name, groups):
 # Providers whose tokens can be priced from local logs: panel id -> ledger provider.
 LEDGER = {"claude": "claude", "codex": "codex"}
 PLAIN = ("5-hour limit", "Weekly limit", "Daily limit", "Monthly limit")
+RESETS = "Resets"
 
 
 def _meter_label(label):
@@ -278,6 +279,8 @@ def _meters(groups):
         fullest = max(rest, key=lambda r: r["pct"])
         if fullest["pct"] > max(r["pct"] for r in chosen):
             chosen.append(fullest)
+    # A waiting usage-limit reset is worth seeing without opening the section.
+    chosen += [r for g in groups for r in g["rows"] if r["label"] == RESETS and r.get("pct") is None]
     return [dict(r, short=_meter_label(r["label"])) for r in chosen]
 
 
@@ -401,7 +404,8 @@ def _caption(rows, rings, groups):
 
 
 def _balance(rows):
-    money = [r for r in rows if r.get("pct") is None and r.get("value") not in (None, "", "—")]
+    money = [r for r in rows if r.get("pct") is None and r["label"] != RESETS
+             and r.get("value") not in (None, "", "—")]
     if not money:
         return None
     r = money[0]
