@@ -2,6 +2,12 @@
 
 ## unreleased - usage-limit resets
 
+- A second Claude sign-in now gets its own card. T3 Code runs extra Claude
+  accounts as Claude Agent instances with their own config folder; Fleet reads
+  each one's login, named after the instance ("Claude OXO"), with its own
+  cache and backoff. One signed in to the same account as `~/.claude` is not
+  shown twice. Claude plans now name the Max size ("Max 20x", "Max 5x") so
+  two Max accounts can be told apart.
 - Codex and Claude now show a **Resets** row when a free usage-limit reset is
   waiting, with how many and when the soonest one expires ("1 available ·
   until Dec 1"). It sits under the provider's meters without opening the
