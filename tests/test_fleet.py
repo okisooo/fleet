@@ -725,7 +725,119 @@ class ClaudeUsageTests(unittest.TestCase):
             ) as renew:
                 fleet.api_claude(force=True)
 
-            renew.assert_called_once_with(cred, "expired", force=True)
+            renew.assert_called_once_with(cred, "expired", force=True, key="claude", config_dir=None)
+
+
+class ClaudeAccountTests(unittest.TestCase):
+    """A second Claude Code sign-in, run by T3 Code with its own CLAUDE_CONFIG_DIR."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.t3 = self.root / "t3"
+        for patch in (mock.patch.object(fleet, "HOME", self.root),
+                      mock.patch.object(fleet, "CACHE", self.root),
+                      mock.patch.dict(os.environ, {"T3CODE_HOME": str(self.t3)})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def login(self, folder, account, tier="default_claude_max_5x", token="second"):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": token, "refreshToken": "refresh", "expiresAt": (time.time() + 3600) * 1000,
+            "subscriptionType": "max", "rateLimitTier": tier}}))
+        claude_json = folder / ".claude.json" if folder.name != ".claude" else self.root / ".claude.json"
+        claude_json.write_text(json.dumps({"oauthAccount": {"accountUuid": account}}))
+        return folder
+
+    def instances(self, **instances):
+        settings = self.t3 / "userdata" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"providerInstances": instances}))
+
+    @staticmethod
+    def claude(home, name=None, enabled=True):
+        return {"driver": "claudeAgent", "enabled": enabled,
+                **({"displayName": name} if name else {}), "config": {"homePath": str(home)}}
+
+    def test_t3_claude_accounts_are_found_and_the_main_one_is_not_repeated(self):
+        self.login(self.root / ".claude", "main", "default_claude_max_20x")
+        second = self.login(self.root / "accounts" / "secondary", "other")
+        same = self.login(self.root / "accounts" / "same", "main")
+        off = self.login(self.root / "accounts" / "off", "third")
+        self.instances(
+            claudeAgent={"driver": "claudeAgent", "enabled": True, "config": {"homePath": ""}},
+            **{"claude-oxo": self.claude(second, "Claude OXO"),
+               "claude-same": self.claude(same, "Same"),
+               "claude-off": self.claude(off, "Off", enabled=False),
+               "claude-gone": self.claude(self.root / "accounts" / "gone", "Gone"),
+               "codex-go": {"driver": "codex", "enabled": True, "config": {"homePath": str(second)}}})
+
+        self.assertEqual(fleet.claude_accounts(), [("Claude OXO", "claude_claude-oxo", second)])
+
+    def test_an_unnamed_or_clashing_account_gets_its_own_name(self):
+        first = self.login(self.root / "a", "a")
+        second = self.login(self.root / "b", "b")
+        self.instances(one=self.claude(first), two=self.claude(second, "Claude"))
+
+        self.assertEqual([name for name, _key, _home in fleet.claude_accounts()], ["Claude 2", "Claude 3"])
+
+    def test_no_t3_settings_means_no_extra_accounts(self):
+        self.assertEqual(fleet.claude_accounts(), [])
+
+    def test_a_second_account_reads_its_own_login_and_keeps_its_own_cache(self):
+        self.login(self.root / ".claude", "main", "default_claude_max_20x", token="first")
+        second = self.login(self.root / "secondary", "other")
+        usage = {"five_hour": {"utilization": 12, "resets_at": None},
+                 "seven_day": {"utilization": 34, "resets_at": None}}
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, usage)) as request:
+            result = fleet._claude_account("Claude OXO", "claude_oxo", second)
+
+        self.assertEqual(request.call_args[0][1], "second")
+        self.assertEqual((result["agent"], result["plan"], result["family"]), ("Claude OXO", "Max 5x", "claude"))
+        self.assertEqual([m["pct"] for m in result["metrics"]], [12, 34])
+        self.assertTrue((self.root / "claude_oxo_last.json").exists())
+        self.assertFalse((self.root / "claude_last.json").exists())
+
+    def test_a_throttled_second_account_asks_claude_code_with_its_config_folder(self):
+        second = self.login(self.root / "secondary", "other")
+        with mock.patch.object(fleet, "_jget", return_value=(429, {}, {})), mock.patch.object(
+            fleet, "_run_claude_usage", return_value=(0, "Current session: 5% used")
+        ) as cli:
+            result = fleet._claude_account("Claude OXO", "claude_oxo", second)
+
+        cli.assert_called_once_with(second / ".credentials.json", second)
+        self.assertEqual([m["pct"] for m in result["metrics"]], [5.0])
+        self.assertGreater(fleet._refresh_cooldown_left("claude_oxo_usage"), 0)
+        self.assertEqual(fleet._refresh_cooldown_left("claude_usage"), 0)
+
+    def test_the_cli_runs_against_the_accounts_config_folder(self):
+        second = self.login(self.root / "secondary", "other")
+        process = mock.Mock(returncode=0)
+        process.communicate.return_value = (b"", b"")
+        with mock.patch.object(fleet, "_claude_cli", return_value="claude"), mock.patch.object(
+            fleet.subprocess, "Popen", return_value=process
+        ) as popen:
+            fleet._run_claude_usage(second / ".credentials.json", second)
+            fleet._run_claude_usage(self.root / ".claude" / ".credentials.json")
+
+        self.assertEqual(popen.call_args_list[0].kwargs["env"]["CLAUDE_CONFIG_DIR"], str(second))
+        self.assertIsNone(popen.call_args_list[1].kwargs["env"])
+
+    def test_a_second_account_never_borrows_the_desktop_apps_numbers(self):
+        second = self.root / "secondary"
+        second.mkdir()
+        (second / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}))
+        with mock.patch.object(fleet, "_claude_from_desktop", side_effect=AssertionError("desktop read")):
+            result = fleet._claude_account("Claude OXO", "claude_oxo", second)
+
+        self.assertEqual(result["err"], fleet.CLAUDE_SIGNED_OUT)
+
+    def test_plan_names_the_max_size(self):
+        self.assertEqual(fleet._claude_plan({"subscriptionType": "max", "rateLimitTier": "default_claude_max_20x"}), "Max 20x")
+        self.assertEqual(fleet._claude_plan({"subscriptionType": "pro", "rateLimitTier": "default_claude_ai"}), "pro")
+        self.assertEqual(fleet._claude_plan({"subscriptionType": "max"}), "max")
 
 
 class ClaudeSignInTests(unittest.TestCase):

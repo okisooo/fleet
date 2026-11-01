@@ -320,13 +320,32 @@ def _claude_from_desktop(out):
 
 
 def api_claude(force=False):
-    out = dict(agent="Claude", plan="", metrics=[], err="", known=False)
-    cred = HOME / ".claude" / ".credentials.json"
+    return _claude_account("Claude", "claude", force=force)
+
+
+def _claude_plan(oauth):
+    """ "max" with tier "default_claude_max_5x" -> "Max 5x": two Max sign-ins
+    side by side are otherwise told apart by name alone."""
+    plan = str(oauth.get("subscriptionType") or oauth.get("rateLimitTier") or "")
+    size = re.search(r"max_(\d+x)\b", str(oauth.get("rateLimitTier") or ""))
+    return f"Max {size.group(1)}" if plan.casefold() == "max" and size else plan
+
+
+def _claude_account(agent, key, config_dir=None, force=False):
+    """One Claude Code sign-in. config_dir is its CLAUDE_CONFIG_DIR; None is
+    ~/.claude, the only one the desktop app's samples can stand in for. key
+    names its cache, backoff and dead-token files, so accounts never share one."""
+    out = dict(agent=agent, plan="", metrics=[], err="", known=False, family="claude")
+    cred = (config_dir or HOME / ".claude") / ".credentials.json"
+
+    def desktop():
+        return None if config_dir else _claude_from_desktop(out)
+
     try:
         full = _read_claude(cred)
         out["known"] = True
         o = full.get("claudeAiOauth", {})
-        out["plan"] = str(o.get("subscriptionType") or o.get("rateLimitTier") or "")
+        out["plan"] = _claude_plan(o)
     except FileNotFoundError:
         out["configured"] = False
         out["err"] = "no Claude Code credentials"
@@ -342,41 +361,39 @@ def api_claude(force=False):
         # The desktop app keeps its own session; prefer its samples over nothing.
         # Its Code tab never fills this file, so using Claude only through the
         # app still leaves Claude Code itself signed out.
-        return _claude_from_desktop(out) or dict(
-            out, configured=False, err=CLAUDE_SIGNED_OUT
-        )
+        return desktop() or dict(out, configured=False, err=CLAUDE_SIGNED_OUT)
     # Auth and usage have separate throttles: a busy usage endpoint must never
     # stop an expired token from being refreshed.
     if rt and exp and exp < time.time() + CLAUDE_REFRESH_MARGIN:
-        status, printed = _renew_claude_via_cli(cred, tok, force=force)
+        status, printed = _renew_claude_via_cli(cred, tok, force=force, key=key, config_dir=config_dir)
         try:
             o = _read_claude(cred).get("claudeAiOauth") or {}
         except (OSError, ValueError, AttributeError):
             o = {}
         if not o.get("accessToken"):
-            return _claude_from_desktop(out) or dict(out, configured=False, err=CLAUDE_SIGNED_OUT)
+            return desktop() or dict(out, configured=False, err=CLAUDE_SIGNED_OUT)
         tok, exp = o["accessToken"], _claude_expiry(o)
         if printed:
             # Claude Code just read usage itself; a second request adds nothing.
             out["metrics"] = printed
-            _save_last("claude", out)
+            _save_last(key, out)
             return out
         if exp and exp < time.time():
-            wait = _refresh_cooldown_left("claude_refresh")
+            wait = _refresh_cooldown_left(f"{key}_refresh")
             if status == "missing":
                 out["err"] = f"{CLAUDE_EXPIRED} · Claude Code is not installed"
             elif status == "busy":
                 out["err"] = f"{CLAUDE_EXPIRED} · renewing again in {max(1, int(wait / 60))}m"
             else:
                 out["err"] = f"{CLAUDE_EXPIRED} · Claude Code could not renew it"
-            return _claude_from_desktop(out) or _cached_or(out, "claude")
-    if _token_dead("claude", tok):
+            return desktop() or _cached_or(out, key)
+    if _token_dead(key, tok):
         out["err"] = CLAUDE_EXPIRED
-        return _claude_from_desktop(out) or _cached_or(out, "claude")
-    usage_cool = 0 if force else _refresh_cooldown_left("claude_usage")
+        return desktop() or _cached_or(out, key)
+    usage_cool = 0 if force else _refresh_cooldown_left(f"{key}_usage")
     if usage_cool:
         out["err"] = f"usage retry in {max(1, int(usage_cool/60))}m"
-        return _cached_or(out, "claude")
+        return _cached_or(out, key)
     hdrs = {"anthropic-beta": "oauth-2025-04-20", "User-Agent": FLEET_UA,
             "Content-Type": "application/json"}
     # cedar_ember=1 adds the usage-limit resets block, as Claude Code's own
@@ -384,22 +401,22 @@ def api_claude(force=False):
     st, hd, j = _jget(CLAUDE_USAGE_URL, tok, hdrs)
     if st == 401:
         # Revoked or expired early: not re-sent until Claude Code writes a new one.
-        _mark_token_dead("claude", tok)
+        _mark_token_dead(key, tok)
         out["err"] = CLAUDE_EXPIRED
-        return _claude_from_desktop(out) or _cached_or(out, "claude")
+        return desktop() or _cached_or(out, key)
     if st != 200 or not isinstance(j, dict):
         # The usage endpoint throttles hard. Back off for as long as it asks
         # (at least five minutes), and ask Claude Code itself instead: its own
         # /usage reads the same numbers without a second Fleet request.
-        _set_cooldown("claude_usage", max(300, _retry_after(hd)))
-        if not _refresh_cooldown_left("claude_cli_usage"):
-            _set_cooldown("claude_cli_usage", 600)
-            run = _run_claude_usage(cred)
+        _set_cooldown(f"{key}_usage", max(300, _retry_after(hd)))
+        if not _refresh_cooldown_left(f"{key}_cli_usage"):
+            _set_cooldown(f"{key}_cli_usage", 600)
+            run = _run_claude_usage(cred, config_dir)
             out["metrics"] = _parse_claude_usage(run[1]) if run and run[0] == 0 else []
         if not out["metrics"]:
             out["err"] = "rate limited" if st == 429 else f"http {st}"
-            return _cached_or(out, "claude")
-        _save_last("claude", out)
+            return _cached_or(out, key)
+        _save_last(key, out)
         return out
     if isinstance(j.get("five_hour"), dict):
         out["metrics"].append(M("Session", j["five_hour"].get("utilization", j["five_hour"].get("percent")),
@@ -420,7 +437,60 @@ def api_claude(force=False):
     metric = _claude_resets_metric(j)
     if metric:
         out["metrics"].append(metric)
-    _save_last("claude", out)
+    _save_last(key, out)
+    return out
+
+
+def _t3_settings():
+    """T3 Code's settings.json: its data folder is T3CODE_HOME, else ~/.t3."""
+    root = os.environ.get("T3CODE_HOME") or apikeys._get_registry_env("T3CODE_HOME")
+    return (Path(root) if root else HOME / ".t3") / "userdata" / "settings.json"
+
+
+def _claude_account_id(config_dir):
+    """Claude Code's account id for a config folder, or None. ~/.claude keeps
+    its .claude.json beside the folder; any other CLAUDE_CONFIG_DIR inside it."""
+    path = config_dir / ".claude.json" if config_dir else HOME / ".claude.json"
+    try:
+        return (json.loads(path.read_text(encoding="utf-8")).get("oauthAccount") or {}).get("accountUuid")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def claude_accounts():
+    """Other Claude Code sign-ins, as (name, key, config folder).
+
+    T3 Code runs extra Claude accounts as Claude Agent instances, each with its
+    own CLAUDE_CONFIG_DIR. Fleet only reads them; an instance that is off, or
+    signed in to the same account as ~/.claude, is left out.
+    """
+    try:
+        instances = json.loads(_t3_settings().read_text(encoding="utf-8")).get("providerInstances") or {}
+        items = list(instances.items())
+    except (OSError, ValueError, AttributeError):
+        return []
+    main = os.path.normcase(os.path.abspath(HOME / ".claude"))
+    main_id = _claude_account_id(None)
+    seen, names, out = {main}, {"claude"}, []
+    for instance_id, instance in items:
+        if not isinstance(instance, dict) or instance.get("driver") != "claudeAgent" or not instance.get("enabled", True):
+            continue
+        home = str((instance.get("config") or {}).get("homePath") or "").strip()
+        if not home or not Path(home).is_absolute():
+            continue
+        folder = Path(home)
+        norm = os.path.normcase(os.path.abspath(folder))
+        account = _claude_account_id(folder)
+        if norm in seen or (account and account == main_id) or not (folder / ".credentials.json").exists():
+            continue
+        seen.add(norm)
+        base = name = str(instance.get("displayName") or "").strip()[:24] or "Claude"
+        number = 2
+        while name.casefold() in names:
+            name, number = f"{base} {number}", number + 1
+        names.add(name.casefold())
+        key = "claude_" + (re.sub(r"[^a-z0-9]+", "-", str(instance_id).casefold()).strip("-") or "extra")
+        out.append((name, key, folder))
     return out
 
 
@@ -433,7 +503,7 @@ def _cached_or(out, agent):
         mets, plan, age, cached_at = last
         return dict(agent=out["agent"], plan=out.get("plan") or plan, metrics=mets,
                     err=f"cached {age} ago · {out.get('err','')}".strip(" ·"),
-                    cached_at=cached_at)
+                    cached_at=cached_at, **({"family": out["family"]} if "family" in out else {}))
     return out
 
 
@@ -509,7 +579,7 @@ def _renewed(agent):
             pass
 
 
-def _run_claude_usage(cred_path):
+def _run_claude_usage(cred_path, config_dir=None):
     """Run Claude Code's own `/usage`, hidden. Returns (exit code, output) or None.
 
     `/usage` is a local command: no model call, no quota spent. Claude Code
@@ -527,6 +597,7 @@ def _run_claude_usage(cred_path):
             [exe, "-p", "/usage", "--no-session-persistence", "--strict-mcp-config",
              "--settings", '{"disableAllHooks":true}'],
             cwd=str(probe), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir)) if config_dir else None,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except OSError as e:
@@ -584,7 +655,7 @@ def _cli_reset(when, now):
     return stamp.isoformat()
 
 
-def _renew_claude_via_cli(cred_path, seen_token, force=False):
+def _renew_claude_via_cli(cred_path, seen_token, force=False, key="claude", config_dir=None):
     """Have Claude Code renew its own login. Fleet never calls the token endpoint.
 
     Anthropic answers refresh requests that do not come from Claude Code itself
@@ -592,9 +663,9 @@ def _renew_claude_via_cli(cred_path, seen_token, force=False):
     Returns (status, metrics): status is "renewed", "valid", "busy", "missing" or
     "failed"; metrics are what Claude Code's `/usage` printed, when it did.
     """
-    if not force and _refresh_cooldown_left("claude_refresh"):
+    if not force and _refresh_cooldown_left(f"{key}_refresh"):
         return "busy", []
-    run = _run_claude_usage(cred_path)
+    run = _run_claude_usage(cred_path, config_dir)
     if run is None:
         return "missing", []
     code, text = run
@@ -605,12 +676,12 @@ def _renew_claude_via_cli(cred_path, seen_token, force=False):
         oauth = {}
     token = oauth.get("accessToken")
     if token and token != seen_token:
-        _renewed("claude")
-        _RUNTIME.info("claude sign-in renewed by Claude Code")
+        _renewed(key)
+        _RUNTIME.info("%s sign-in renewed by Claude Code", key)
         return "renewed", metrics
     if token and _claude_expiry(oauth) > time.time():
         return "valid", metrics
-    _renew_failed(f"exit {code}" if code else "login unchanged")
+    _renew_failed(f"exit {code}" if code else "login unchanged", key)
     return "failed", metrics
 
 
@@ -1533,7 +1604,7 @@ def _paced(key, fetch, force=False):
     now = time.monotonic()
     with _LIVE_LOCK:
         last = _LIVE.get(key)
-    pace = PACE.get(key, PACE["api_key"])
+    pace = PACE.get(key) or PACE.get(key.split(":", 1)[0]) or PACE["api_key"]
     if last:
         previous = json.loads(last[1])
         if (previous.get("retry_at") or 0) > time.time() or (not force and now - last[0] < pace):
@@ -1559,23 +1630,34 @@ def collect_api(force_claude=False, include_api_keys=True):
             pool.submit(_paced, "api_key:" + spec["id"], lambda spec=spec: _collect_one_spec(spec), force_claude)
             for spec in specs
         ]
-    def local(p):
+    # (pace key, name, fetch): the built-in providers, then any other Claude sign-ins.
+    tasks = [(p.__name__, p.__name__.replace("api_", "").title()[:8],
+              (lambda p=p: p(force=force_claude)) if p is api_claude else p) for p in API_PROVIDERS]
+    try:
+        extra = claude_accounts()
+    except Exception as e:
+        dbg("claude accounts", repr(e))
+        extra = []
+    index = 1 + next(i for i, task in enumerate(tasks) if task[0] == "api_claude")
+    tasks[index:index] = [
+        ("api_claude:" + key, name,
+         lambda a=(name, key, folder): _claude_account(*a, force=force_claude))
+        for name, key, folder in extra
+    ]
+
+    def local(task):
+        key, name, fetch = task
         try:
-            return _paced(
-                p.__name__,
-                (lambda: p(force=force_claude)) if p is api_claude else p,
-                force=force_claude,
-            )
+            return _paced(key, fetch, force=force_claude)
         except Exception as e:
-            dbg(p.__name__, repr(e))
-            return dict(agent=p.__name__.replace("api_", "").title()[:8], plan="",
-                        metrics=[], err=f"crash: {e.__class__.__name__}")
+            dbg(key, repr(e))
+            return dict(agent=name, plan="", metrics=[], err=f"crash: {e.__class__.__name__}")
 
     try:
         # Each local provider is its own credential file and endpoint, so they run
         # side by side; a poll costs the slowest provider, not the sum of them.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(API_PROVIDERS)) as local_pool:
-            out.extend(local_pool.map(local, API_PROVIDERS))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as local_pool:
+            out.extend(local_pool.map(local, tasks))
         for future in pending or []:
             try:
                 out.append(future.result(timeout=30))

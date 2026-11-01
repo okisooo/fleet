@@ -304,7 +304,7 @@ PROVIDER_ASSETS = {
 
 def _provider_asset_path(agent):
     key = "".join(char for char in str(agent or "").casefold() if char.isalnum())
-    filename = PROVIDER_ASSETS.get(key)
+    filename = PROVIDER_ASSETS.get(key) or ("claude.png" if key.startswith("claude") else None)
     path = ASSETS_DIR / filename if filename else None
     return path if path and path.is_file() else None
 
