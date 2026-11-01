@@ -10,6 +10,10 @@
   exist. Claude's resets come from the block its usage endpoint adds when
   asked with `cedar_ember=1`, the same request Claude Code's own usage menu
   makes. Fleet only reads them; redeem a reset in Codex or Claude Code.
+- Fixed both Claude API rows showing "Http 400" on the first UTC day of every
+  month. Anthropic's cost report holds only finished UTC days and rejects a
+  range that starts today, so on the 1st Fleet now asks from yesterday and
+  leaves that day out of the month's total.
 
 ## unreleased - backup API organization
 
