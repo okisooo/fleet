@@ -66,6 +66,16 @@ class AnthropicApiTests(unittest.TestCase):
         self.assertNotIn("Authorization", calls[0][2])
         self.assertIsNone(calls[0][3])
 
+    def test_first_of_the_month_asks_from_yesterday_and_keeps_it_out(self):
+        # The report holds only finished UTC days: a range starting today is
+        # rejected with "ending date must be after starting date" (http 400).
+        first = datetime(2026, 11, 1, 18, 59, tzinfo=timezone.utc).timestamp()
+        with mock.patch.object(apikeys.time, "time", return_value=first):
+            out, calls = self.collect([{"data": [bucket(31, "1900")]}])
+        self.assertEqual(out["err"], "")
+        self.assertEqual(parse_qs(urlparse(calls[0][1]).query)["starting_at"], ["2026-10-31T00:00:00Z"])
+        self.assertEqual([m["extra"] for m in out["metrics"]], ["$0.00", "$0.00"])
+
     def test_follows_pagination_before_publishing_totals(self):
         out, calls = self.collect([
             {"data": [bucket(1, "100")], "has_more": True, "next_page": "next one"},

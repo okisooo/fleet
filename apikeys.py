@@ -610,7 +610,11 @@ def _anthropic_cost(spec, key, http, M, timeout):
                metrics=[], err="", compact=False)
     now = datetime.fromtimestamp(time.time(), timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    query = {"starting_at": today.replace(day=1).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    month = today.replace(day=1)
+    # The report holds only finished UTC days and rejects a range with none, so
+    # on the 1st it is asked from yesterday; that day stays out of the month.
+    start = min(month, today - timedelta(days=1))
+    query = {"starting_at": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
              "bucket_width": "1d", "limit": "31"}
     headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "Accept": "application/json"}
     month_cents = today_cents = Decimal(0)
@@ -636,8 +640,10 @@ def _anthropic_cost(spec, key, http, M, timeout):
                 results = bucket["results"]
                 if day.tzinfo is None or not isinstance(results, list):
                     raise ValueError()
-                if not today.replace(day=1) <= day < today + timedelta(days=1):
+                if not start <= day < today + timedelta(days=1):
                     raise ValueError()
+                if day < month:
+                    continue
                 for result in results:
                     if result.get("currency", "USD").upper() != "USD":
                         raise ValueError()

@@ -4,6 +4,8 @@ Fleet shows two kinds of provider:
 
 - **local clients** — Claude Code, Codex, Grok, Antigravity. Detected automatically
   from the CLI/app state already on the machine. Nothing to configure.
+  Codex and Claude also show a **Resets** row while a free usage-limit reset
+  is waiting; redeem it in Codex (`/usage`) or Claude Code.
 - **public API keys** — an environment variable, or a Claude key saved through
   Settings. Each adds its own row to the flyout.
 

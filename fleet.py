@@ -379,7 +379,9 @@ def api_claude(force=False):
         return _cached_or(out, "claude")
     hdrs = {"anthropic-beta": "oauth-2025-04-20", "User-Agent": FLEET_UA,
             "Content-Type": "application/json"}
-    st, hd, j = _jget("https://api.anthropic.com/api/oauth/usage", tok, hdrs)
+    # cedar_ember=1 adds the usage-limit resets block, as Claude Code's own
+    # usage menu asks; the plain URL leaves it null.
+    st, hd, j = _jget(CLAUDE_USAGE_URL, tok, hdrs)
     if st == 401:
         # Revoked or expired early: not re-sent until Claude Code writes a new one.
         _mark_token_dead("claude", tok)
@@ -415,6 +417,9 @@ def api_claude(force=False):
     ex = j.get("extra_usage") or {}
     if ex.get("is_enabled"):
         out["metrics"].append(M("Extra $", None, None, f"${ex.get('used_credits',0)/100:.2f}"))
+    metric = _claude_resets_metric(j)
+    if metric:
+        out["metrics"].append(metric)
     _save_last("claude", out)
     return out
 
@@ -451,6 +456,7 @@ def _set_cooldown(agent, secs=300):
 # Claude Code renews an access token in the last five minutes before it expires;
 # asking any earlier would only read usage with the old token.
 CLAUDE_REFRESH_MARGIN = 240
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
 CLAUDE_CLI_TIMEOUT = 90
 # Lands in tray.log: renewal outcomes were invisible when Claude went stale.
 _RUNTIME = logging.getLogger("fleet.runtime")
@@ -646,6 +652,101 @@ def _codex_credit_metric(balance):
     return M("Credits", None, None, f"${balance}")
 
 
+def _count(value):
+    """A non-negative whole count, or 0 for anything else."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _day(ts):
+    """'Nov 30' in local time, English month names whatever the Windows locale."""
+    d = datetime.fromtimestamp(ts)
+    return f"{_MONTHS[d.month - 1].title()} {d.day}"
+
+
+def _resets_metric(count, expires=None, extra=()):
+    """One "Resets" row: how many usage-limit resets are waiting, and until when."""
+    parts = []
+    if count:
+        parts.append(f"{count} available")
+        if expires:
+            parts.append(f"until {_day(expires)}")
+    parts.extend(extra)
+    return M("Resets", None, None, " · ".join(parts)) if parts else None
+
+
+# Codex reports its reset count in every usage reply; the expiry needs a second
+# request, so it is read only while resets exist and at most every 15 minutes.
+_CODEX_RESET_DETAIL = {"count": None, "at": 0.0, "expires": None}
+CODEX_RESET_DETAIL_SECS = 900
+
+
+def _codex_reset_expiry(count, tok, hdr):
+    cache = _CODEX_RESET_DETAIL
+    if cache["count"] == count and time.time() - cache["at"] < CODEX_RESET_DETAIL_SECS:
+        return cache["expires"]
+    expires = None
+    st, _hd, j = _jget("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", tok, hdr)
+    if st == 200 and isinstance(j, dict):
+        dates = [_epoch(c.get("expires_at")) for c in (j.get("credits") or [])
+                 if isinstance(c, dict) and c.get("status", "available") == "available"
+                 and c.get("is_supported_by_plan", True) is not False]
+        dates = [d for d in dates if d and d > time.time()]
+        expires = min(dates) if dates else None
+    cache.update(count=count, at=time.time(), expires=expires)
+    return expires
+
+
+def _codex_resets_metric(summary, tok=None, hdr=None):
+    """Codex's free usage-limit resets ("You have 1 usage limit reset available")."""
+    count = _count((summary or {}).get("available_count")) if isinstance(summary, dict) else 0
+    if not count:
+        return None
+    expires = None
+    if tok:
+        try:
+            expires = _codex_reset_expiry(count, tok, hdr or {})
+        except Exception:
+            expires = None
+    return _resets_metric(count, expires)
+
+
+def _claude_resets_metric(j, now=None):
+    """Claude's usage-limit resets, from the blocks /api/oauth/usage?cedar_ember=1 adds.
+
+    cedar_ember: granted resets, each with resets_left and an end date.
+    juniper_tide: the once-a-week 5-hour reset, when Anthropic offers it.
+    """
+    now = time.time() if now is None else now
+    count, ends = 0, []
+    ce = j.get("cedar_ember") if isinstance(j, dict) else None
+    if isinstance(ce, dict):
+        for grant in ce.get("grants") or []:
+            if not isinstance(grant, dict) or grant.get("paused"):
+                continue
+            end = _epoch(grant.get("ends_at"))
+            if end and end <= now:
+                continue
+            left = _count(grant.get("resets_left"))
+            count += left
+            if left and end:
+                ends.append(end)
+    extra = []
+    jt = j.get("juniper_tide") if isinstance(j, dict) else None
+    if isinstance(jt, dict) and jt.get("eligible"):
+        if jt.get("available"):
+            extra.append("5-hour ready")
+        else:
+            back = _epoch(jt.get("next_available_at"))
+            if back and back > now:
+                extra.append(f"5-hour back {_day(back)}")
+    return _resets_metric(count, min(ends) if ends else None, extra)
+
+
 def api_codex():
     out = dict(agent="Codex", plan="", metrics=[], err="", known=False)
     tok = acct = None
@@ -721,6 +822,9 @@ def api_codex():
         metric = _codex_credit_metric(cr.get("balance"))
         if metric:
             out["metrics"].append(metric)
+    metric = _codex_resets_metric(j.get("rate_limit_reset_credits"), tok, hdr)
+    if metric:
+        out["metrics"].append(metric)
     _save_last("codex", out)
     return out
 
