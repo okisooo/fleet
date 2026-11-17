@@ -39,6 +39,7 @@ def costs(*values, more=None):
 class BillingCycleTests(unittest.TestCase):
     def setUp(self):
         fleet._CHATGPT_CYCLE.update(account=None, at=0.0, cycle=None)
+        fleet._SIDE_FAILURES.clear()
 
     def test_the_cycle_ends_at_renewal_and_began_a_calendar_month_earlier(self):
         cycle = fleet._parse_chatgpt_cycle(account_check(), "acct-1")
@@ -75,13 +76,17 @@ class BillingCycleTests(unittest.TestCase):
         with mock.patch.object(fleet, "_jget", return_value=(503, {}, {})):
             self.assertEqual(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW + 7 * 3600), first)
 
-    def test_a_failed_first_read_is_retried_in_fifteen_minutes_not_six_hours(self):
-        with mock.patch.object(fleet, "_jget", return_value=(0, {}, {})) as get:
+    def test_a_failed_first_read_is_retried_in_two_minutes_not_six_hours(self):
+        with mock.patch.object(fleet, "_jget", return_value=(0, {}, {})) as get, \
+                mock.patch.object(fleet._RUNTIME, "info") as log:
             self.assertIsNone(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW))
-            self.assertIsNone(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW + 600))
+            self.assertIsNone(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW + 60))
             self.assertEqual(get.call_count, 1)
+            self.assertIsNone(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW + 130))
+            self.assertEqual(get.call_count, 2)
+        self.assertEqual(log.call_count, 1)  # the same failure is noted once
         with mock.patch.object(fleet, "_jget", return_value=(200, {}, account_check())):
-            self.assertIsNotNone(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW + 960))
+            self.assertIsNotNone(fleet._chatgpt_cycle("tok", {}, "acct-1", now=NOW + 260))
 
 
 class ApiCreditTests(unittest.TestCase):

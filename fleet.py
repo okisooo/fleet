@@ -757,20 +757,34 @@ def _resets_metric(count, expires=None, extra=()):
 # request, so it is read only while resets exist and at most every 15 minutes.
 _CODEX_RESET_DETAIL = {"count": None, "at": 0.0, "expires": None}
 CODEX_RESET_DETAIL_SECS = 900
+# A failed side request (the source of one row) keeps what was known and is
+# tried again after two minutes; tray.log notes each kind of failure once.
+SIDE_RETRY_SECS = 120
+_SIDE_FAILURES = set()
+
+
+def _side_failed(what, status):
+    if (what, status) not in _SIDE_FAILURES:
+        _SIDE_FAILURES.add((what, status))
+        _RUNTIME.info("%s unavailable (%s); trying again in %d s",
+                      what, f"http {status}" if status else "no response", SIDE_RETRY_SECS)
 
 
 def _codex_reset_expiry(count, tok, hdr):
     cache = _CODEX_RESET_DETAIL
     if cache["count"] == count and time.time() - cache["at"] < CODEX_RESET_DETAIL_SECS:
         return cache["expires"]
-    expires = None
     st, _hd, j = _jget("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", tok, hdr)
-    if st == 200 and isinstance(j, dict):
-        dates = [_epoch(c.get("expires_at")) for c in (j.get("credits") or [])
-                 if isinstance(c, dict) and c.get("status", "available") == "available"
-                 and c.get("is_supported_by_plan", True) is not False]
-        dates = [d for d in dates if d and d > time.time()]
-        expires = min(dates) if dates else None
+    if st != 200 or not isinstance(j, dict):
+        _side_failed("Codex reset expiry", st)
+        expires = cache["expires"] if cache["count"] == count else None
+        cache.update(count=count, at=time.time() - CODEX_RESET_DETAIL_SECS + SIDE_RETRY_SECS, expires=expires)
+        return expires
+    dates = [_epoch(c.get("expires_at")) for c in (j.get("credits") or [])
+             if isinstance(c, dict) and c.get("status", "available") == "available"
+             and c.get("is_supported_by_plan", True) is not False]
+    dates = [d for d in dates if d and d > time.time()]
+    expires = min(dates) if dates else None
     cache.update(count=count, at=time.time(), expires=expires)
     return expires
 
@@ -887,10 +901,10 @@ def _chatgpt_cycle(tok, hdr, acct=None, now=None):
     if st == 200:
         cycle = _parse_chatgpt_cycle(j, acct)
     else:
+        _side_failed("ChatGPT billing cycle", st)
         if cache["account"] != acct or (cycle is not None and cycle["end"] <= now):
             cycle = None
-        # A failed read keeps what is known and is tried again in 15 minutes.
-        at = now - CHATGPT_CYCLE_SECS + API_CREDIT_SPEND_SECS
+        at = now - CHATGPT_CYCLE_SECS + SIDE_RETRY_SECS
     cache.update(account=acct, at=at, cycle=cycle)
     return cycle
 

@@ -1424,9 +1424,26 @@ class UsageResetTests(unittest.TestCase):
         get.assert_not_called()
 
     def test_codex_count_survives_a_failed_detail_request(self):
-        with mock.patch.object(fleet, "_jget", return_value=(500, {}, None)):
+        with mock.patch.object(fleet, "_jget", return_value=(500, {}, None)), \
+                mock.patch.object(fleet._RUNTIME, "info"):
             self.assertEqual(fleet._codex_resets_metric({"available_count": 2}, "tok", {}),
                              fleet.M("Resets", None, None, "2 available"))
+
+    def test_a_failed_detail_request_keeps_the_expiry_and_retries_in_two_minutes(self):
+        end = time.time() + 20 * 86400
+        detail = {"credits": [{"status": "available", "expires_at": end}]}
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)):
+            fleet._codex_resets_metric({"available_count": 1}, "tok", {})
+        fleet._CODEX_RESET_DETAIL["at"] -= fleet.CODEX_RESET_DETAIL_SECS  # 15 minutes later
+        with mock.patch.object(fleet, "_jget", return_value=(429, {}, {})) as get, \
+                mock.patch.object(fleet._RUNTIME, "info"):
+            self.assertEqual(fleet._codex_resets_metric({"available_count": 1}, "tok", {})["resets"], end)
+            self.assertEqual(fleet._codex_resets_metric({"available_count": 1}, "tok", {})["resets"], end)
+        self.assertEqual(get.call_count, 1)
+        fleet._CODEX_RESET_DETAIL["at"] -= fleet.SIDE_RETRY_SECS  # two minutes later
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)) as get:
+            fleet._codex_resets_metric({"available_count": 1}, "tok", {})
+        self.assertEqual(get.call_count, 1)
 
     def test_claude_grants_add_up_and_skip_paused_or_ended(self):
         now = 1_800_000_000
