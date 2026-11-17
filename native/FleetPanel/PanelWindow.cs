@@ -34,6 +34,8 @@ namespace FleetPanel
         // WM_APP + 0x48 opens straight onto the settings page (tray menu: Settings).
         private const int WM_FLEET_SETTINGS = 0x8000 + 0x48;
         private const int WM_FLEET_DASHBOARD = 0x8000 + 0x49;
+        // WM_APP + 0x4A: the pointer is on the tray icon, so a click is likely.
+        private const int WM_FLEET_WARM = 0x8000 + 0x4A;
         private const double EdgeGap = 12;   // DIP between the card and the taskbar edge
         private const int Away = -32000;     // where the closed flyout waits
 
@@ -67,6 +69,8 @@ namespace FleetPanel
         private double[] anchor;
         private readonly bool[] buttons = new bool[7];
         private string openTiming = "";
+        private DateTime warmedAt = DateTime.MinValue;
+        private readonly DispatcherTimer warmTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(260) };
         // Where the window stands when open (device pixels) and the scale it was laid out at.
         private int placedLeft, placedTop, placedWidth, placedHeight;
         private double placedScale = 1;
@@ -107,6 +111,16 @@ namespace FleetPanel
             signalDebounce.Tick += (s, e) => { signalDebounce.Stop(); pendingModel = true; OnSignalTick(); };
             clockTimer.Tick += (s, e) => view.Tick();
             clickTimer.Tick += (s, e) => { if (open && !closing) WatchOutsideClicks(); };
+            warmTimer.Tick += (s, e) =>
+            {
+                warmTimer.Stop();
+                if (warming && !open)
+                {
+                    warming = false;
+                    view.Rest();
+                    view.PrepareIntro();
+                }
+            };
         }
 
         public void Start()
@@ -188,7 +202,8 @@ namespace FleetPanel
             {
                 if (action == "claude-sign-in") SignIn();
                 else if (action == "grok-renew") RenewGrok();
-                else if (action == "anthropic-billing") OpenBilling();
+                else if (action == "anthropic-billing") OpenBilling("https://platform.claude.com/settings/billing", "Claude");
+                else if (action == "openai-billing") OpenBilling("https://platform.openai.com/settings/organization/billing/overview", "OpenAI");
                 else if (action == "api-settings") { view.ShowSettings(); UpdateLayout(); }
             };
             view.SettingChanged += SaveSetting;
@@ -273,9 +288,22 @@ namespace FleetPanel
                 handled = true;
                 var posted = unchecked((uint)lParam.ToInt64());
                 var delay = unchecked((uint)Environment.TickCount - posted);
+                // From the click itself (the last input, unless the pointer moved on)
+                // to here: the tray's share of the wait.
+                var input = Native.SinceLastInput();
                 anchor = Native.TrayIconRect(wParam) ?? anchor;
-                openTiming = delay < 10000 ? "msg_ms=" + delay + " " : "";
+                var warmed = (DateTime.UtcNow - warmedAt).TotalSeconds;
+                openTiming = (delay < 10000 ? "msg_ms=" + delay + " " : "")
+                    + (input != null && input < 10000 ? "input_ms=" + input + " " : "")
+                    + (warmed < 60 ? "warmed_ms=" + Math.Round(warmed * 1000) + " " : "");
                 Toggle();
+                return (IntPtr)1;
+            }
+            if (message == WM_FLEET_WARM)
+            {
+                handled = true;
+                anchor = Native.TrayIconRect(wParam) ?? anchor;
+                Warm();
                 return (IntPtr)1;
             }
             if (message == WM_FLEET_DATA)
@@ -421,6 +449,13 @@ namespace FleetPanel
             }
         }
 
+        private static readonly int ProcessId = Process.GetCurrentProcess().Id;
+
+        private string HeartbeatJson() =>
+            "{\"pid\": " + ProcessId + ", \"hwnd\": " + hwnd.ToInt64() + ", \"ts\": "
+            + Clock.Now().ToString("F3", System.Globalization.CultureInfo.InvariantCulture)
+            + ", \"visible\": " + (open ? "true" : "false") + ", \"native\": true}";
+
         /// <summary>
         /// The tray restarts a panel whose heartbeat is 35 s old, so a beat must not
         /// be lost to a scanner briefly holding the file: on failure it falls back to
@@ -429,9 +464,7 @@ namespace FleetPanel
         /// </summary>
         private void WriteHeartbeat()
         {
-            var json = "{\"pid\": " + Process.GetCurrentProcess().Id + ", \"hwnd\": " + hwnd.ToInt64() + ", \"ts\": "
-                + Clock.Now().ToString("F3", System.Globalization.CultureInfo.InvariantCulture)
-                + ", \"visible\": " + (open ? "true" : "false") + ", \"native\": true}";
+            var json = HeartbeatJson();
             if (WriteAtomic("panel-heartbeat.json", json) || WriteDirect("panel-heartbeat.json", json))
             {
                 lastHeartbeat = DateTime.UtcNow;
@@ -497,15 +530,15 @@ namespace FleetPanel
             if (!open || closing) Toggle();
         }
 
-        private void OpenBilling()
+        private void OpenBilling(string url, string provider)
         {
             try
             {
-                Process.Start(new ProcessStartInfo("https://platform.claude.com/settings/billing") { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
             }
             catch (Exception)
             {
-                Note("could not open Claude billing");
+                Note("could not open " + provider + " billing");
             }
         }
 
@@ -622,6 +655,34 @@ namespace FleetPanel
 
         // ---------- open / close ----------
 
+        /// <summary>
+        /// The pointer reached the tray icon. While it travels on to the click, draw the
+        /// open flyout once where nobody sees it, with the current reading and a fresh
+        /// copy of the screen behind, so memory and graphics that sat idle for hours
+        /// are back in place before the click: the first open after a while no longer
+        /// stalls a frame for a tenth of a second or more.
+        /// </summary>
+        private void Warm()
+        {
+            if (open || closing || warming || (DateTime.UtcNow - warmedAt).TotalSeconds < 10)
+            {
+                return;
+            }
+            warmedAt = DateTime.UtcNow;
+            if (pendingModel)
+            {
+                LoadModel();
+            }
+            view.Tick();
+            Place();
+            if (Environment.GetEnvironmentVariable("FLEET_PANEL_OFFSCREEN") != "1") CaptureBackdrop();
+            warming = true;
+            view.PrepareIntro();
+            view.PlayIntro();
+            warmTimer.Stop();
+            warmTimer.Start();
+        }
+
         private void Toggle()
         {
             if (warming)
@@ -660,36 +721,53 @@ namespace FleetPanel
             if (!offscreen) CaptureBackdrop();
             var placed = clock.Elapsed.TotalMilliseconds;
             Native.SetWindowPos(hwnd, IntPtr.Zero, placedLeft, placedTop, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            var moved = clock.Elapsed.TotalMilliseconds;
             view.PlayIntro();
+            var shown = clock.Elapsed.TotalMilliseconds;
             if (!offscreen)
             {
-                Activate();
-                Native.SetForegroundWindow(hwnd);
+                // The card goes out first and takes the keyboard right after its first
+                // frame (Input runs below Render). Taking the foreground from the shell
+                // can cost a cold system a tenth of a second, which used to come before
+                // anything was drawn.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!open || closing) return;
+                    Activate();
+                    Native.SetForegroundWindow(hwnd);
+                    openTiming += string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "activate_ms={0:F1} ", clock.Elapsed.TotalMilliseconds);
+                }), DispatcherPriority.Input);
             }
-            var shown = clock.Elapsed.TotalMilliseconds;
             EventHandler firstFrame = null;
             firstFrame = (s, e) =>
             {
                 CompositionTarget.Rendering -= firstFrame;
                 openTiming += string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                    "place_ms={0:F1} show_ms={1:F1} first_frame_ms={2:F1} ", placed, shown, clock.Elapsed.TotalMilliseconds);
+                    "place_ms={0:F1} move_ms={1:F1} show_ms={2:F1} first_frame_ms={3:F1} ", placed, moved, shown, clock.Elapsed.TotalMilliseconds);
             };
             CompositionTarget.Rendering += firstFrame;
             for (var i = 0; i < buttons.Length; i++) buttons[i] = (Native.GetAsyncKeyState(i) & 0x8000) != 0;
             if (!offscreen) clickTimer.Start();
 
-            // Everything that can wait for the first frame does.
+            // Everything that can wait for the first frame does, and the disk is
+            // never touched on the UI thread while the card moves.
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (!open || closing)
                 {
                     return;
                 }
-                Touch("panel.visible");
                 lastVisibleTouch = DateTime.UtcNow;
-                // A paced refresh: opening must not spend Claude's usage budget.
-                Touch("refresh.soon");
-                WriteHeartbeat();
+                lastHeartbeat = DateTime.UtcNow;
+                var beat = HeartbeatJson();
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    Touch("panel.visible");
+                    // A paced refresh: opening must not spend Claude's usage budget.
+                    Touch("refresh.soon");
+                    if (!WriteAtomic("panel-heartbeat.json", beat)) WriteDirect("panel-heartbeat.json", beat);
+                });
                 StartLiveGlass();
                 clockTimer.Start();
             }), DispatcherPriority.Background);

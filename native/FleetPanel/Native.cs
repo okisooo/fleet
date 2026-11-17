@@ -160,6 +160,16 @@ namespace FleetPanel
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+        [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+
+        /// <summary>Milliseconds since the user's last mouse or key input, or null.</summary>
+        public static uint? SinceLastInput()
+        {
+            var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+            return GetLastInputInfo(ref info) ? unchecked((uint)Environment.TickCount - info.dwTime) : (uint?)null;
+        }
         [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT point, uint flags);
         [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);

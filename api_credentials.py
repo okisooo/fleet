@@ -12,6 +12,10 @@ from ctypes import wintypes
 ACCOUNT_PAIRS = (("anthropic", "anthropic-admin"),
                  ("anthropic-backup", "anthropic-backup-admin"))
 TARGETS = {name: "Fleet/api/" + name for pair in ACCOUNT_PAIRS for name in pair}
+# The admin key of the OpenAI API organization linked to ChatGPT. The Codex card
+# reads it for the subscription's API credits; it is not a provider of its own.
+OPENAI_ADMIN = "openai-admin"
+SLOTS = {**TARGETS, OPENAI_ADMIN: "Fleet/api/" + OPENAI_ADMIN}
 
 
 class _Credential(ctypes.Structure):
@@ -49,5 +53,5 @@ def _read_target(target):
 
 
 def read(provider):
-    target = TARGETS.get(provider)
+    target = SLOTS.get(provider)
     return _read_target(target) if target else None

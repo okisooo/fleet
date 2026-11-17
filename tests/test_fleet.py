@@ -1399,10 +1399,10 @@ class CodexWindowTests(unittest.TestCase):
 
 
 class UsageResetTests(unittest.TestCase):
-    """Free usage-limit resets show as one "Resets" row for Codex and Claude."""
+    """Reset tokens (free usage-limit resets) show as one "Reset tokens" row."""
 
     def setUp(self):
-        fleet._CODEX_RESET_DETAIL.update(count=None, at=0.0, expires=None)
+        fleet._CODEX_RESET_DETAIL.update(count=None, at=0.0, tokens=[])
 
     def test_codex_reset_count_and_expiry(self):
         end = time.time() + 20 * 86400
@@ -1412,10 +1412,29 @@ class UsageResetTests(unittest.TestCase):
         ], "available_count": 1}
         with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)) as get:
             metric = fleet._codex_resets_metric({"available_count": 1, "applicable_available_count": 0}, "tok", {})
-            again = fleet._codex_resets_metric({"available_count": 1}, "tok", {})
-        self.assertEqual(metric, fleet.M("Resets", None, None, f"1 available · until {fleet._day(end)}"))
+            again = fleet._codex_resets_metric({"available_count": 1, "applicable_available_count": 0}, "tok", {})
+        self.assertEqual((metric["label"], metric["resets"]), ("Reset tokens", end))
+        self.assertEqual(metric["extra"], f"1 · expires {fleet._day(end)}")
+        self.assertEqual((metric["count"], metric["usable"]), (1, 0))
+        self.assertEqual(metric["tokens"], [{"expires": end, "count": 1}])
         self.assertEqual(again, metric)
         self.assertEqual(get.call_count, 1)  # the detail is cached between polls
+
+    def test_every_codex_token_keeps_its_own_expiry(self):
+        first, second = time.time() + 14 * 86400, time.time() + 25 * 86400
+        detail = {"credits": [{"status": "available", "expires_at": second},
+                              {"status": "available", "expires_at": first}]}
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)):
+            metric = fleet._codex_resets_metric({"available_count": 2, "applicable_available_count": 0}, "tok", {})
+        self.assertEqual(metric["tokens"], [{"expires": first, "count": 1}, {"expires": second, "count": 1}])
+        self.assertEqual(metric["extra"], f"2 · next expires {fleet._day(first)}")
+
+    def test_tokens_codex_could_apply_now_say_so(self):
+        end = time.time() + 20 * 86400
+        detail = {"credits": [{"status": "available", "expires_at": end}] * 2}
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)):
+            metric = fleet._codex_resets_metric({"available_count": 2, "applicable_available_count": 2}, "tok", {})
+        self.assertEqual((metric["extra"], metric["usable"]), ("2 · usable now", 2))
 
     def test_codex_without_resets_has_no_row_and_no_extra_request(self):
         with mock.patch.object(fleet, "_jget") as get:
@@ -1424,9 +1443,27 @@ class UsageResetTests(unittest.TestCase):
         get.assert_not_called()
 
     def test_codex_count_survives_a_failed_detail_request(self):
-        with mock.patch.object(fleet, "_jget", return_value=(500, {}, None)):
-            self.assertEqual(fleet._codex_resets_metric({"available_count": 2}, "tok", {}),
-                             fleet.M("Resets", None, None, "2 available"))
+        with mock.patch.object(fleet, "_jget", return_value=(500, {}, None)), \
+                mock.patch.object(fleet._RUNTIME, "info"):
+            metric = fleet._codex_resets_metric({"available_count": 2}, "tok", {})
+        self.assertEqual((metric["label"], metric["resets"], metric["extra"]), ("Reset tokens", None, "2 available"))
+        self.assertEqual((metric["count"], metric["tokens"]), (2, []))
+
+    def test_a_failed_detail_request_keeps_the_expiry_and_retries_in_two_minutes(self):
+        end = time.time() + 20 * 86400
+        detail = {"credits": [{"status": "available", "expires_at": end}]}
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)):
+            fleet._codex_resets_metric({"available_count": 1}, "tok", {})
+        fleet._CODEX_RESET_DETAIL["at"] -= fleet.CODEX_RESET_DETAIL_SECS  # 15 minutes later
+        with mock.patch.object(fleet, "_jget", return_value=(429, {}, {})) as get, \
+                mock.patch.object(fleet._RUNTIME, "info"):
+            self.assertEqual(fleet._codex_resets_metric({"available_count": 1}, "tok", {})["resets"], end)
+            self.assertEqual(fleet._codex_resets_metric({"available_count": 1}, "tok", {})["resets"], end)
+        self.assertEqual(get.call_count, 1)
+        fleet._CODEX_RESET_DETAIL["at"] -= fleet.SIDE_RETRY_SECS  # two minutes later
+        with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)) as get:
+            fleet._codex_resets_metric({"available_count": 1}, "tok", {})
+        self.assertEqual(get.call_count, 1)
 
     def test_claude_grants_add_up_and_skip_paused_or_ended(self):
         now = 1_800_000_000
@@ -1438,7 +1475,9 @@ class UsageResetTests(unittest.TestCase):
             {"id": "d", "resets_left": 5, "ends_at": iso(now - 60)},
         ]}}
         metric = fleet._claude_resets_metric(payload, now=now)
-        self.assertEqual(metric["extra"], f"3 available · until {fleet._day(now + 3 * 86400)}")
+        self.assertEqual(metric["extra"], f"3 · next expires {fleet._day(now + 3 * 86400)}")
+        self.assertEqual(metric["tokens"], [{"expires": now + 3 * 86400, "count": 2},
+                                            {"expires": now + 9 * 86400, "count": 1}])
 
     def test_claude_without_resets_has_no_row(self):
         self.assertIsNone(fleet._claude_resets_metric({"cedar_ember": None, "juniper_tide": None}))

@@ -17,6 +17,10 @@ namespace FleetPanel
         public int Live;
         public int Cached;
         public List<Provider> Providers = new List<Provider>();
+        /// <summary>Every upcoming reset and expiry across accounts, soonest first.</summary>
+        public List<ResetLine> Resets = new List<ResetLine>();
+        /// <summary>Each account's waiting reset tokens, the soonest to expire first.</summary>
+        public List<TokenSummary> Tokens = new List<TokenSummary>();
         public List<Inactive> Inactive = new List<Inactive>();
         public List<Known> Known = new List<Known>();
         public Dictionary<string, string> ApiAccounts = new Dictionary<string, string>();
@@ -64,7 +68,7 @@ namespace FleetPanel
                 {
                     Id = Str(item, "id"), Name = Str(item, "name"), Icon = Str(item, "icon"), Mark = Str(item, "mark"),
                     Plan = Str(item, "plan"), Detail = Str(item, "detail"), Kind = Str(item, "kind"),
-                    Headline = Num(item, "headline"),
+                    Headline = Num(item, "headline"), Note = Str(item, "note"),
                 };
                 if (item.TryGetValue("account", out var ac) && ac is Dictionary<string, object> account)
                     p.AccountMode = Str(account, "mode");
@@ -74,14 +78,6 @@ namespace FleetPanel
                     p.FreshReason = Str(fresh, "reason");
                     p.FreshAt = Num(fresh, "at");
                     p.FreshStale = fresh.TryGetValue("stale", out var st) && st is bool stale && stale;
-                }
-                if (item.TryGetValue("caption", out var c) && c is Dictionary<string, object> caption)
-                {
-                    p.Caption = new Caption
-                    {
-                        Kind = Str(caption, "kind"), Label = Str(caption, "label"), Text = Str(caption, "text"),
-                        Tone = Str(caption, "tone"), At = Num(caption, "at"),
-                    };
                 }
                 if (item.TryGetValue("balance", out var b) && b is Dictionary<string, object> balance)
                 {
@@ -104,9 +100,18 @@ namespace FleetPanel
                     }
                     p.Groups.Add(group);
                 }
-                foreach (var r in List(item, "meters"))
+                if (item.TryGetValue("glance", out var gl) && gl is Dictionary<string, object> glance
+                    && glance.TryGetValue("row", out var gr) && gr is Dictionary<string, object> glanceRow)
                 {
-                    p.Meters.Add(ParseRow(r));
+                    p.Glance = new Glance
+                    {
+                        Row = ParseRow(glanceRow),
+                        Blocked = glance.TryGetValue("blocked", out var bl) && bl is bool blocked && blocked,
+                    };
+                    foreach (var a in List(glance, "alerts"))
+                    {
+                        p.Glance.Alerts.Add(new GlanceAlert { Kind = Str(a, "kind"), Label = Str(a, "label"), At = Num(a, "at") });
+                    }
                 }
                 foreach (var g in List(item, "all_groups"))
                 {
@@ -119,6 +124,33 @@ namespace FleetPanel
                     p.Spend = ParseSpend(spend);
                 }
                 data.Providers.Add(p);
+            }
+            foreach (var item in List(root, "resets"))
+            {
+                var line = new ResetLine
+                {
+                    Id = Str(item, "id"), Name = Str(item, "name"), Icon = Str(item, "icon"), Mark = Str(item, "mark"),
+                    Kind = Str(item, "kind"), State = Str(item, "state"), Value = Str(item, "value"),
+                    At = Num(item, "at") ?? 0,
+                };
+                if (item.TryGetValue("labels", out var labels) && labels is IEnumerable names && !(labels is string))
+                {
+                    foreach (var name in names)
+                    {
+                        if (name != null) line.Labels.Add(Convert.ToString(name, CultureInfo.InvariantCulture));
+                    }
+                }
+                if (line.At > 0) data.Resets.Add(line);
+            }
+            foreach (var item in List(root, "tokens"))
+            {
+                var waiting = new TokenSummary
+                {
+                    Id = Str(item, "id"), Name = Str(item, "name"), Icon = Str(item, "icon"), Mark = Str(item, "mark"),
+                    Count = (int)(Num(item, "count") ?? 0), Usable = (int)(Num(item, "usable") ?? 0), Next = Num(item, "next"),
+                    Tokens = Expiries(item),
+                };
+                if (waiting.Count > 0) data.Tokens.Add(waiting);
             }
             foreach (var item in List(root, "inactive"))
             {
@@ -165,7 +197,22 @@ namespace FleetPanel
             ResetAt = Num(r, "reset_at"), Severity = Str(r, "severity"),
             Window = Num(r, "window"), Elapsed = Num(r, "elapsed"), Reserve = Num(r, "reserve"),
             RunoutAt = Num(r, "runout_at"), State = Str(r, "state"), Rate = Num(r, "rate"),
+            Amount = Num(r, "amount"), AmountTotal = Num(r, "amount_total"),
+            Count = (int)(Num(r, "count") ?? 0), Usable = (int)(Num(r, "usable") ?? 0), Tokens = Expiries(r),
         };
+
+        /// <summary>A reset-token list: [{"expires", "count"}], soonest first.</summary>
+        private static List<TokenExpiry> Expiries(Dictionary<string, object> map)
+        {
+            var expiries = new List<TokenExpiry>();
+            foreach (var t in List(map, "tokens"))
+            {
+                var at = Num(t, "expires");
+                if (at != null) expiries.Add(new TokenExpiry { Expires = at.Value, Count = Math.Max(1, (int)(Num(t, "count") ?? 1)) });
+            }
+            expiries.Sort((a, b) => a.Expires.CompareTo(b.Expires));
+            return expiries;
+        }
 
         private static Spend ParseSpend(Dictionary<string, object> map)
         {
@@ -260,13 +307,15 @@ namespace FleetPanel
         public double? FreshAt, Headline;
         public bool FreshStale;
         public string AccountMode = "";
-        public Caption Caption;
+        /// <summary>A sentence about a figure that needs one (how API credits are counted).</summary>
+        public string Note = "";
         public Balance Balance;
         public List<Ring> Rings = new List<Ring>();
         public List<Group> Groups = new List<Group>();
         public List<Group> AllGroups = new List<Group>();
-        /// <summary>The limits shown while the section is closed; every row is also in Groups.</summary>
-        public List<Row> Meters = new List<Row>();
+        /// <summary>The closed account: the limit that stops it first and what needs attention.
+        /// Null for an account without limits (a balance, a month's spend).</summary>
+        public Glance Glance;
         public Spend Spend;
     }
 
@@ -315,9 +364,18 @@ namespace FleetPanel
         public double? ResetAt, Window, Elapsed;
     }
 
-    internal sealed class Caption
+    internal sealed class Glance
     {
-        public string Kind = "", Label = "", Text = "", Tone = "";
+        public Row Row;
+        /// <summary>A used-up limit stops the whole account until Row resets.</summary>
+        public bool Blocked;
+        public List<GlanceAlert> Alerts = new List<GlanceAlert>();
+    }
+
+    /// <summary>"full", "high" or "runout", the limit it is about, and when.</summary>
+    internal sealed class GlanceAlert
+    {
+        public string Kind = "", Label = "";
         public double? At;
     }
 
@@ -338,6 +396,36 @@ namespace FleetPanel
         public double? Pct, ResetAt, Window, Elapsed, Reserve, RunoutAt;
         /// <summary>Percentage points per hour lately, from Fleet's own readings.</summary>
         public double? Rate;
+        /// <summary>A dollar meter's amounts (API credits): spent, and the whole grant.</summary>
+        public double? Amount, AmountTotal;
+        /// <summary>Reset tokens: how many wait, how many could be redeemed now, and their expiries.</summary>
+        public int Count, Usable;
+        public List<TokenExpiry> Tokens = new List<TokenExpiry>();
+    }
+
+    /// <summary>Reset tokens that expire together.</summary>
+    internal sealed class TokenExpiry
+    {
+        public double Expires;
+        public int Count;
+    }
+
+    /// <summary>One account's waiting reset tokens.</summary>
+    internal sealed class TokenSummary
+    {
+        public string Id = "", Name = "", Icon = "", Mark = "";
+        public int Count, Usable;
+        public double? Next;
+        public List<TokenExpiry> Tokens = new List<TokenExpiry>();
+    }
+
+    /// <summary>One line of the resets list: an account's limits that reset together,
+    /// or an expiry (reset tokens, API credits).</summary>
+    internal sealed class ResetLine
+    {
+        public string Id = "", Name = "", Icon = "", Mark = "", Kind = "", State = "", Value = "";
+        public List<string> Labels = new List<string>();
+        public double At;
     }
 
     internal sealed class Inactive
@@ -355,8 +443,10 @@ namespace FleetPanel
     {
         public static double Now() => (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
 
+        // Reset times arrive a fraction of a second either side of the minute
+        // (7:59:59.5 for an 8:00 reset), so clock times round to the nearest minute.
         private static DateTime Local(double epoch) =>
-            new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(epoch).ToLocalTime();
+            new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(Math.Round(epoch / 60) * 60).ToLocalTime();
 
         /// <summary>"in 41 min", "in 4 h 5 min", "in 1 d 11 h": a countdown in plain words.</summary>
         public static string In(double? epoch)
@@ -421,7 +511,8 @@ namespace FleetPanel
             return (int)(seconds / 86400) + "d";
         }
 
-        /// <summary>"41m", "4h 10m", "5d 7h": a countdown narrow enough for a column.</summary>
+        /// <summary>"41m 08s", "4h 10m", "5d 7h": a countdown narrow enough for a column.
+        /// The last hour counts seconds too, so a reset that is close visibly ticks.</summary>
         public static string Left(double? epoch)
         {
             if (epoch == null)
@@ -429,8 +520,9 @@ namespace FleetPanel
                 return "";
             }
             var seconds = (long)Math.Max(0, epoch.Value - Now());
-            if (seconds < 60) return "now";
-            if (seconds < 3600) return seconds / 60 + "m";
+            if (seconds < 1) return "now";
+            if (seconds < 60) return seconds + "s";
+            if (seconds < 3600) return seconds / 60 + "m " + (seconds % 60).ToString("00", CultureInfo.InvariantCulture) + "s";
             if (seconds < 86400)
             {
                 var minutes = seconds / 60 % 60;
@@ -440,7 +532,8 @@ namespace FleetPanel
             return seconds / 86400 + "d" + (hours > 0 ? " " + hours + "h" : "");
         }
 
-        /// <summary>"1:19 AM" within the day, "Fri 8:00 AM" later in the week.</summary>
+        /// <summary>"1:19 AM" within the day, "Fri 8:00 AM" later in the week, "Dec 5"
+        /// beyond it: short enough for a table column.</summary>
         public static string Day(double? epoch)
         {
             if (epoch == null)
@@ -448,9 +541,37 @@ namespace FleetPanel
                 return "";
             }
             var at = Local(epoch.Value);
-            // Within a day the clock time says it; past that, the weekday too.
+            // Within a day the clock time says it; past that, the weekday too, and
+            // a week or more out only the date is unambiguous.
             if (at - DateTime.Now < TimeSpan.FromHours(20)) return At(epoch);
-            return at.ToString("ddd ", CultureInfo.CurrentCulture) + At(epoch);
+            if ((at.Date - DateTime.Now.Date).TotalDays < 7) return at.ToString("ddd ", CultureInfo.CurrentCulture) + At(epoch);
+            return at.ToString("MMM d", CultureInfo.CurrentCulture);
+        }
+
+        /// <summary>The exact local moment: "11:30 PM" today, "Wed 2:00 AM" within the
+        /// week, "Dec 5 6:16 AM" later.</summary>
+        public static string When(double? epoch)
+        {
+            if (epoch == null)
+            {
+                return "";
+            }
+            var at = Local(epoch.Value);
+            var days = (at.Date - DateTime.Now.Date).TotalDays;
+            if (days < 1) return At(epoch);
+            if (days < 7) return at.ToString("ddd ", CultureInfo.CurrentCulture) + At(epoch);
+            return at.ToString("MMM d ", CultureInfo.CurrentCulture) + At(epoch);
+        }
+
+        /// <summary>"Resets Thu, Nov 20 at 8:00 AM": a full sentence for a tooltip.</summary>
+        public static string Full(string verb, double? epoch)
+        {
+            if (epoch == null)
+            {
+                return "";
+            }
+            var at = Local(epoch.Value);
+            return verb + " " + at.ToString("ddd, MMM d", CultureInfo.CurrentCulture) + " at " + At(epoch);
         }
     }
 

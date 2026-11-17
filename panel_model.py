@@ -10,6 +10,10 @@ Schema 3 adds what the tokens in local agent logs would cost at API list prices
 (ledger.py's snapshot, passed in as `usage`) and how fast each limit has been
 filling lately (`rates`, from Fleet's own readings). Both are optional: without
 them the model is schema 2's plus the closed-section meters.
+
+Schema 5 adds `resets`, every upcoming reset and expiry across accounts, soonest
+first; `tokens`, each account's waiting reset tokens; and a provider `note` for
+figures that need a sentence of explanation.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from pathlib import Path
 import fleet
 import api_credentials
 
-SCHEMA = 4
+SCHEMA = 6
 
 
 def _assets_dir():
@@ -61,6 +65,8 @@ WINDOWS = {
     "monthly": ("Monthly limit", 30 * 86400),
     "balance": ("Balance", None),
     "credits": ("Credits", None),
+    # Readings saved before 0.4.2.6 named the reset-token row "Resets".
+    "resets": (fleet.RESET_TOKENS, None),
     "extra $": ("Extra usage", None),
     "messages": ("Messages", None),
     "pay-go": ("Pay as you go", None),
@@ -128,14 +134,30 @@ def _row(metric, label=None, window=None, scoped=False):
     else:
         value = extra or "—"
     named, seconds = _window(metric.get("label"), scoped and pct is not None)
-    return {
+    span = metric.get("window_seconds")
+    row = {
         "label": label or named,
         "pct": pct,
         "value": value,
         "reset_at": fleet._epoch(metric.get("resets")),
-        "window": window or seconds,
+        "window": window or (span if isinstance(span, (int, float)) and span > 0 else None) or seconds,
         "severity": severity(pct),
     }
+    # A dollar meter (API credits) also carries its amounts, so the flyout can
+    # print dollars used or left beside the bar instead of a percentage.
+    amount, total = metric.get("amount"), metric.get("amount_total")
+    if pct is not None and isinstance(amount, (int, float)) and isinstance(total, (int, float)) and total > 0:
+        row.update(amount=float(amount), amount_total=float(total))
+    # Reset tokens: how many, how many could be redeemed now, and when each expires.
+    count = metric.get("count")
+    if row["label"] == fleet.RESET_TOKENS and isinstance(count, int) and count > 0:
+        tokens = [{"expires": float(t["expires"]), "count": int(t.get("count") or 1)}
+                  for t in metric.get("tokens") or []
+                  if isinstance(t, dict) and isinstance(t.get("expires"), (int, float))]
+        usable = metric.get("usable")
+        row.update(count=count, usable=usable if isinstance(usable, int) and usable > 0 else 0,
+                   tokens=sorted(tokens, key=lambda t: t["expires"]))
+    return row
 
 
 def _icon(raw_name):
@@ -247,7 +269,8 @@ def _rings(name, groups):
 # Providers whose tokens can be priced from local logs: panel id -> ledger provider.
 LEDGER = {"claude": "claude", "codex": "codex"}
 PLAIN = ("5-hour limit", "Weekly limit", "Daily limit", "Monthly limit")
-RESETS = "Resets"
+RESETS = fleet.RESET_TOKENS
+CREDITS = fleet.API_CREDITS
 
 
 def _meter_label(label):
@@ -281,9 +304,95 @@ def _meters(groups):
         fullest = max(rest, key=lambda r: r["pct"])
         if fullest["pct"] > max(r["pct"] for r in chosen):
             chosen.append(fullest)
-    # A waiting usage-limit reset is worth seeing without opening the section.
+    # Waiting reset tokens are worth seeing without opening the section, and so
+    # are a subscription's API credits.
     chosen += [r for g in groups for r in g["rows"] if r["label"] == RESETS and r.get("pct") is None]
+    chosen += [r for g in groups for r in g["rows"] if r["label"] == CREDITS]
     return [dict(r, short=_meter_label(r["label"])) for r in chosen]
+
+
+def _expiring(count):
+    """'1 reset token expires', '2 reset tokens expire'."""
+    if count == 1:
+        return "1 reset token expires"
+    return f"{count} reset tokens expire" if count else "Reset tokens expire"
+
+
+def _token_lines(provider, row, now):
+    """One line per reset-token expiry (tokens sharing a minute share a line)."""
+    lines = {}
+    for token in row.get("tokens") or []:
+        if token["expires"] <= now:
+            continue
+        key = round(token["expires"] / 60)
+        line = lines.setdefault(key, {"id": provider["id"], "name": provider["name"], "icon": provider["icon"],
+                                      "mark": provider["mark"], "kind": "expiry", "labels": [],
+                                      "at": token["expires"], "state": "calm", "value": row.get("value"),
+                                      "count": 0})
+        line["count"] += token["count"]
+    for line in lines.values():
+        line["labels"] = [_expiring(line["count"])]
+    return list(lines.values())
+
+
+def _token_summary(providers, now):
+    """Each account's waiting reset tokens, the soonest to expire first: the pinned
+    "Reset tokens" line of the resets card."""
+    out = []
+    for provider in providers:
+        for group in provider["all_groups"]:
+            for row in group["rows"]:
+                if row["label"] != RESETS or not row.get("count"):
+                    continue
+                tokens = [t for t in row.get("tokens") or [] if t["expires"] > now]
+                out.append({"id": provider["id"], "name": provider["name"], "icon": provider["icon"],
+                            "mark": provider["mark"], "count": row["count"], "usable": row.get("usable") or 0,
+                            "next": tokens[0]["expires"] if tokens else None, "tokens": tokens})
+    out.sort(key=lambda t: (t["next"] is None, t["next"] or 0, t["name"]))
+    return out
+
+
+def _upcoming(providers, now):
+    """Every reset and expiry across accounts, soonest first: the flyout's
+    "Next resets" list. Limits on one account that reset in the same minute
+    share a line ("Weekly, Fable wk"), kept apart from any that are used up,
+    so a "full" line names only the limits that block. Each reset token's
+    expiry is a line of its own."""
+    out = []
+    for provider in providers:
+        lines = {}
+        for group in provider["all_groups"]:
+            for row in group["rows"]:
+                if row["label"] == RESETS and row.get("tokens"):
+                    out.extend(_token_lines(provider, row, now))
+                    continue
+                at = row.get("reset_at")
+                if not isinstance(at, (int, float)) or at <= now:
+                    continue
+                if row["label"] == RESETS:
+                    # A reading saved before tokens were listed one by one.
+                    kind, label = "expiry", "Reset tokens expire"
+                elif row["label"] == CREDITS:
+                    kind, label = "credits", "API credits renew"
+                elif row.get("pct") is not None:
+                    kind, label = "limit", _meter_label(row["label"])
+                    if group.get("title"):
+                        label = f"{group['title']} {label[:1].lower()}{label[1:]}"
+                else:
+                    continue
+                full = row.get("state") == "full"
+                key = (kind, round(at / 60), full)
+                if key in lines:
+                    if label not in lines[key]["labels"]:
+                        lines[key]["labels"].append(label)
+                    continue
+                lines[key] = {"id": provider["id"], "name": provider["name"], "icon": provider["icon"],
+                              "mark": provider["mark"], "kind": kind, "labels": [label], "at": at,
+                              "state": "full" if full else "calm",
+                              "value": row.get("value") if kind != "limit" else ""}
+        out.extend(lines.values())
+    out.sort(key=lambda line: (line["at"], line["name"]))
+    return out
 
 
 def _span_row(metrics):
@@ -403,6 +512,82 @@ def _caption(rows, rings, groups):
             return {"kind": "text", "text": " · ".join(quiet) + " unused", "tone": "calm"}
         return {"kind": "reset", "label": _short(r["label"]), "at": r.get("reset_at"), "tone": "calm"}
     return None
+
+
+ALERT_ORDER = {"full": 0, "high": 1, "runout": 2}
+
+
+def _glance(groups):
+    """What a closed account shows: the one limit that stops it first, and only
+    what needs attention besides it.
+
+    A used-up all-model window (5-hour, weekly) means the account waits for it.
+    Model families (Antigravity's Gemini, Claude & GPT) are separate pools: the
+    account waits only once every family is used up. A model-scoped limit
+    (Claude's "Fable weekly") never blocks the account; used up or nearly so it
+    is an alert, and so is any limit on course to run out before it resets.
+    Reset tokens and API credits are not limits; the resets card and the open
+    section show them. None for an account without limits.
+    """
+    timed = [(group, row) for group in groups for row in group["rows"]
+             if row.get("pct") is not None and row["label"] not in (RESETS, CREDITS)
+             and not str(row.get("value", "")).startswith("$")]
+    if not timed:
+        return None
+
+    def name(group, row):
+        label = _short(row["label"])
+        return f"{group['title']} {label[:1].lower()}{label[1:]}" if group.get("title") else label
+
+    def until(pair):
+        reset = pair[1].get("reset_at")
+        return reset if isinstance(reset, (int, float)) else float("inf")
+
+    def blocker(unit):
+        """A used-up pool waits for the last of its used-up windows."""
+        full = [pair for pair in unit if pair[1]["state"] == "full"]
+        return max(full, key=until) if full else None
+
+    def alert(kind, pair, at=None):
+        return {"kind": kind, "label": name(*pair), "at": at if at is not None else pair[1].get("reset_at")}
+
+    general = [(g, r) for g, r in timed if not g.get("title") and r["label"] in PLAIN]
+    if general:
+        units = [general]
+    elif any(g.get("title") for g, _ in timed):
+        units = [unit for unit in ([(g, r) for g, r in timed if g is group] for group in groups if group.get("title")) if unit]
+    else:
+        units = [timed]
+    pooled = {id(r) for unit in units for _, r in unit}
+    blockers = [blocker(unit) for unit in units]
+    alerts = []
+    blocked = all(blockers)
+    open_rows = [pair for unit, block in zip(units, blockers) if not block for pair in unit]
+    if blocked:
+        binding = min(blockers, key=until)
+    else:
+        binding = max(open_rows, key=lambda p: (p[1]["pct"], p[1].get("window") or 0, -until(p)))
+    # A run-out says more than "almost used up": it says when.
+    running = [pair for pair in timed if pair[1].get("runout_at") and pair[1]["state"] != "full"]
+    soonest = None if blocked or not running else min(running, key=lambda p: p[1]["runout_at"])
+    quiet = soonest[1] if soonest else None
+    if soonest:
+        alerts.append(alert("runout", soonest, soonest[1]["runout_at"]))
+    if not blocked:
+        alerts += [alert("full", block) for block in blockers if block]
+        alerts += [alert("high", pair) for pair in open_rows
+                   if pair[1] is not binding[1] and pair[1] is not quiet and pair[1]["state"] == "high"]
+    for pair in timed:
+        if id(pair[1]) in pooled:
+            continue
+        if pair[1]["state"] == "full":
+            # Back no later than the account itself: nothing more to say.
+            if not blocked or until(pair) > until(binding) + 60:
+                alerts.append(alert("full", pair))
+        elif pair[1]["state"] == "high" and not blocked and pair[1] is not quiet:
+            alerts.append(alert("high", pair))
+    alerts.sort(key=lambda a: (ALERT_ORDER[a["kind"]], a["at"] if a["at"] is not None else float("inf")))
+    return {"row": dict(binding[1], short=name(*binding)), "blocked": blocked, "alerts": alerts[:2]}
 
 
 def _balance(rows):
@@ -565,6 +750,8 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                 "caption": _caption(rows, rings, groups),
                 "balance": balance,
                 "meters": _meters(groups),
+                "glance": _glance(groups),
+                "note": next((str(m["note"]) for m in all_shown if m.get("note")), ""),
                 "spend": _spend(pid, shown, usage) if cost_on else None,
                 "account": {"mode": agent["account"]["mode"]}
                 if pid in api_credentials.TARGETS and isinstance(agent.get("account"), dict)
@@ -583,6 +770,8 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
         "live": fresh,
         "cached": len(providers) - fresh,
         "providers": providers,
+        "resets": _upcoming(providers, now),
+        "tokens": _token_summary(providers, now),
         "inactive": inactive,
         "known": known,
         # Local history remains useful when a client is signed out. Never put
@@ -595,7 +784,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                      for key in ("files", "pending_files", "skipped_zst", "updated", "since")}
                     if cost_on and usage else None,
         "api_accounts": [{"id": item["id"], "source": item.get("source", ""), "enabled": item.get("enabled") is not False}
-                         for item in (accounts or []) if item.get("id") in api_credentials.TARGETS
+                         for item in (accounts or []) if item.get("id") in api_credentials.SLOTS
                          and item.get("source", "") in ("", "windows", "environment")],
         "summary": _summary(usage, settings),
         "settings": {key: settings[key] for key in ("units", "tray_icon", "alerts", "cost") if key in settings},

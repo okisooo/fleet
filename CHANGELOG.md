@@ -1,5 +1,58 @@
 # changelog
 
+## unreleased - important first, and a quicker open
+
+- The flyout now puts what matters first. Every account is one compact row:
+  the limit that stops it first as a meter with how much is left or used, the
+  exact local time it resets and a live countdown. A used-up account reads
+  **Limit reached** in red. A second line appears only when something needs
+  attention: a model's own limit used up, a limit on course to run out (with
+  the clock time it runs out at this pace), a reset token Codex would accept
+  now, or a reading that is old. **Resets** follows, in time order with the
+  reset tokens, then one card for what your tokens came to at API prices and
+  the money accounts (OpenRouter credit, Claude API spend). On a 1080p screen
+  the flyout is about 800 px tall instead of filling it.
+- Click an account for the whole deal: every limit with how it is pacing and
+  when it resets, its reset tokens and API credits, then the plan, the last
+  day's activity and the spend sheet. The recent rate of each limit moved into
+  the pace column's tooltip. **API value** opens the Dashboard.
+- Opening is quicker. When the pointer reaches the tray icon, Fleet draws the
+  flyout once where nobody sees it, so the first open after a long idle no
+  longer stalls a frame for a tenth of a second or more. The flyout shows its
+  first frame before it takes keyboard focus, and the files an open writes no
+  longer touch the window's own thread. `panel-perf.log` now also records the
+  time from the click (`input_ms`), the warm-up (`warmed_ms`), and the move and
+  focus steps.
+
+## unreleased - resets, reset tokens and ChatGPT API credits
+
+- **Resets** lists every limit window across accounts, soonest first, each
+  with its exact local time ("Fri 8:00 AM") and a countdown that ticks while
+  the flyout is open (with seconds in the last hour). Used-up limits are marked
+  in red. Reset-token expiries and API-credit renewals are listed the same way.
+  Closed, it shows the reset tokens and the next resets; click it for the rest.
+  The Dashboard lists them all and shows the time and a countdown for every
+  limit.
+- **Reset tokens**, the free usage-limit resets Codex and Claude grant, are
+  shown one by one. A pinned line in **Resets** gives each account's count and
+  when the next one expires, or "usable now" when Codex would accept one; each
+  token's expiry is its own line in the list, so two tokens no longer read as
+  expiring on the first one's date. The provider row is now called **Reset
+  tokens**, its open section lists every token's exact expiry with a
+  countdown, and a used-up limit says "reset token usable now" when Codex could
+  clear it. Fleet only reads them; redeem one in Codex (`/usage`) or Claude Code.
+- Hovering any countdown shows the exact reset time. Clock times round to the
+  nearest minute, so a reset reported as 7:59:59.5 reads 8:00 AM. The open
+  section's limits table now says Left or Used to match the setting.
+- ChatGPT Pro's monthly OpenAI API credits appear on the Codex card as **API
+  credits**: the $100 tier's grant, renewing at the end of the ChatGPT billing
+  cycle (read with Codex's sign-in from ChatGPT's own account check). OpenAI
+  has no balance endpoint; with an admin key for the linked API organization,
+  saved under **Settings → ChatGPT API credits** or set as `OPENAI_ADMIN_KEY`,
+  Fleet adds up that organization's spend this cycle from OpenAI's Costs API
+  and shows an estimate of what is left, in dollars. **Open billing** opens
+  OpenAI Platform billing for the exact balance.
+
 ## unreleased - usage-limit resets
 
 - A second Claude sign-in now gets its own card. T3 Code runs extra Claude

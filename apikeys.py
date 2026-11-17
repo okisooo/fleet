@@ -454,6 +454,10 @@ def account_status(config=None):
         names = [user["env"]] if user.get("env") else spec["env"]
         out.append({"id": pid, "source": _key_for(dict(spec, env=names))[0] or "",
                     "enabled": user.get("enabled") is not False})
+    admin = api_credentials.OPENAI_ADMIN
+    source = ("environment" if _first_env(BUILTIN_BY_ID[admin]["env"])[1]
+              else "windows" if api_credentials.read(admin) else "")
+    out.append({"id": admin, "source": source, "enabled": True})
     return out
 
 

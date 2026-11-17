@@ -10,9 +10,10 @@
 
 track Claude Code, OpenAI Codex, Grok CLI, Google Antigravity, and API providers
 without opening each service. a tray meter tracks quota pressure; the native flyout
-brings limits, reset times, pace, balances, and what your tokens would cost at API
-prices together. choose **Dashboard** to switch to a detailed page inside the
-same popup. readings are marked **live, cached, or unavailable**, so an
+puts the important first: each account's tightest limit with the exact time it
+resets, then every reset in time order, then balances and what your tokens would
+cost at API prices. click an account for all its limits, pace and spend, or choose
+**Dashboard** to switch to a detailed page inside the same popup. readings are marked **live, cached, or unavailable**, so an
 older result stays visibly older.
 
 <p align="center">
@@ -68,12 +69,14 @@ keep `_internal` beside `Fleet.exe` when upgrading a portable copy.
 | **cost estimates** | what Claude Code and Codex tokens would cost at public API prices, from local logs: today, 7 and 30 days, plus burn rate. estimates only; subscriptions are not billed per token |
 | **API providers** | OpenRouter, DeepSeek, Kimi/Moonshot, MiniMax, Z.AI, and LiteLLM balances or usage; OpenAI organization cost with an admin key |
 | **Claude API** | free connection check for a regular key; this month's and today's (UTC) organization spend for an admin key. the included Max/Team credit balance is shown only in Claude Console, which **Open billing** links to |
+| **ChatGPT API credits** | the monthly OpenAI API credits included with ChatGPT Pro, on the Codex card: when they renew, and an estimate of what is left from the linked organization's spend with an admin key. OpenAI shows the exact balance only in Platform billing, which **Open billing** links to |
 | **opt-in probes** | rate-limit headers from OpenAI, Anthropic, and other supported APIs; real inference requests that may cost money |
 | **custom providers** | map an HTTPS JSON usage endpoint for a gateway, proxy, or self-hosted service |
 
-balances stay in the flyout; repeated zero-use quota windows collapse. support
-and metrics vary by provider. see the [provider matrix and limitations](docs/providers.md),
-including unsupported Gemini API keys and console-only dashboards.
+balances stay in the flyout; each account shows its tightest limit until you
+click it. support and metrics vary by provider. see the
+[provider matrix and limitations](docs/providers.md), including unsupported Gemini
+API keys and console-only dashboards.
 
 ## quick start
 

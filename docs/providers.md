@@ -4,8 +4,14 @@ Fleet shows two kinds of provider:
 
 - **local clients** — Claude Code, Codex, Grok, Antigravity. Detected automatically
   from the CLI/app state already on the machine. Nothing to configure.
-  Codex and Claude also show a **Resets** row while a free usage-limit reset
-  is waiting; redeem it in Codex (`/usage`) or Claude Code.
+  Codex and Claude also show a **Reset tokens** row while free usage-limit
+  resets are waiting: how many, and when the next one expires. Redeem one in
+  Codex (`/usage`) or Claude Code; Fleet only reads them. Codex also shows the monthly OpenAI **API credits** a ChatGPT plan
+  includes ([below](#chatgpt-api-credits)).
+  **Resets** at the top of the flyout pins each account's reset tokens, then
+  lists every limit window across accounts, soonest first, with the exact
+  local time and a live countdown; each token's expiry and the API-credit
+  renewal are listed the same way.
   Another Claude account set up in T3 Code (a Claude Agent instance with its
   own home folder) shows as its own card, under the instance's name.
 - **public API keys** — an environment variable, or a Claude key saved through
@@ -89,6 +95,34 @@ Existing `ANTHROPIC_API_KEY` and `ANTHROPIC_ADMIN_KEY` environment variables als
 work. If both are present, Fleet shows the admin billing report instead of a
 duplicate regular-key connection row. An explicitly enabled paid probe remains
 separate and opt-in.
+
+### ChatGPT API credits
+
+ChatGPT Pro and Business include monthly
+[OpenAI API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits)
+for the API organization you link from ChatGPT or API Platform billing. They
+expire at the end of each ChatGPT billing cycle without rollover, are spent
+before purchased credits, and do not raise ChatGPT or Codex usage limits.
+
+- The Codex card shows an **API credits** row only for plans Fleet can match to
+  OpenAI's table. So far that is the $100 Pro tier (ChatGPT reports it as
+  `prolite`): $100 a month. Other tiers stay hidden until verified.
+- The renewal is the end of the ChatGPT billing cycle, read with Codex's
+  existing sign-in from the same account check the ChatGPT web app makes, at
+  most every six hours. It appears in **Resets** with the limits.
+- OpenAI has no endpoint for the remaining balance. With an admin key for the
+  linked API organization, Fleet adds up that organization's spend since the
+  cycle began from the documented Costs API (`GET /v1/organization/costs`, at
+  most every 15 minutes) and shows what is left of the grant. This is an
+  estimate: a prorated first month, other credit grants, or daily cost buckets
+  that do not line up with the cycle's start can make it differ from OpenAI
+  billing. Without an admin key the row shows the grant and its renewal only.
+- Save the key in **Settings → ChatGPT API credits** (Windows Credential
+  Manager, `Fleet/api/openai-admin`) or set `OPENAI_ADMIN_KEY`. A saved key
+  feeds only this row; the environment variable also turns on the separate
+  **OpenAI org** cost row, as before.
+- **Open billing** opens OpenAI Platform billing, the only place with the exact
+  balance. Fleet only reads; it never claims, links or spends the credits.
 
 ### Antigravity when closed
 

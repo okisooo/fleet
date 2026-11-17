@@ -19,14 +19,16 @@ namespace FleetPanel
 {
     /// <summary>
     /// The flyout: one acrylic card standing on the taskbar, built from Windows 11's
-    /// own tokens and type ramp. On top, what the agents' tokens came to at API list
-    /// prices (today, 7 and 30 days). Below, one flat section per provider: its
-    /// limits as slim meters (used, a notch where an even pace would be, time to the
-    /// reset), and a line only when something needs attention. A click opens the
-    /// section in place: activity over the last day, burn rate, spend by span, model
-    /// and project, and how each limit is pacing. Logins that need a hand are a row
-    /// with the fix. Shared by the live window and the offscreen renderer, so
-    /// previews show exactly what ships.
+    /// own tokens and type ramp, most important first. On top, every account as one
+    /// compact row: the limit that stops it first as a slim meter, the exact local
+    /// time it resets and a live countdown, and a line only when something needs
+    /// attention (AccountsView). Below, the resets across accounts in time order
+    /// with the reset tokens (ResetsView), then what the tokens came to at API list
+    /// prices and the money accounts. A click opens an account in place, the whole
+    /// deal: every limit and how it is pacing, reset tokens, credits, activity over
+    /// the last day, burn rate, spend by span, model and project. Logins that need a
+    /// hand are a row with the fix. Shared by the live window and the offscreen
+    /// renderer, so previews show exactly what ships.
     ///
     /// Motion is render-only: the card slides out of the taskbar on a cached layer,
     /// and a section opens by revealing its height, so frames stay cheap at any
@@ -43,7 +45,6 @@ namespace FleetPanel
         private const double Pad = 18;
         // Meters line up under the provider's name, past its icon.
         private const double Indent = 26;
-        private const double LabelColumn = 64;
         private const double KeyColumn = 92;
 
         private static readonly FontFamily DisplayFont = new FontFamily("Segoe UI Variable Display, Segoe UI");
@@ -78,7 +79,7 @@ namespace FleetPanel
         private string page = "usage";
         private string selected = "";
         private string units;
-        private string apiEditing = "", apiFeedback = "";
+        private string apiEditing = "", apiFeedback = "", apiFeedbackId = "";
         private PasswordBox apiInput;
         private double updated;
         private DateTime busyUntil = DateTime.MinValue;
@@ -281,7 +282,7 @@ namespace FleetPanel
         {
             apiInput?.Clear();
             apiInput = null;
-            apiEditing = apiFeedback = "";
+            apiEditing = apiFeedback = apiFeedbackId = "";
         }
 
         /// <summary>For offscreen previews: open one provider's section.</summary>
@@ -319,11 +320,23 @@ namespace FleetPanel
                 scroller.ScrollToVerticalOffset(offset);
                 return;
             }
+            // Most important first: every account's binding limit and when it resets,
+            // then the resets across accounts, then spend and balances.
             content.Children.Add(Header("Fleet", back: false));
-            var band = Band();
-            if (band != null)
+            var accounts = AccountsCard(data.Providers.Where(p => p.Glance != null).ToList());
+            if (accounts != null)
             {
-                content.Children.Add(band);
+                content.Children.Add(accounts);
+            }
+            var resets = ResetsCard();
+            if (resets != null)
+            {
+                content.Children.Add(resets);
+            }
+            var money = MoneyCard(data.Providers.Where(p => p.Glance == null).ToList());
+            if (money != null)
+            {
+                content.Children.Add(money);
             }
             if (data.Providers.Count == 0 && data.Inactive.Count == 0)
             {
@@ -333,16 +346,6 @@ namespace FleetPanel
                 empty.HorizontalAlignment = HorizontalAlignment.Center;
                 content.Children.Add(empty);
             }
-            foreach (var provider in data.Providers)
-            {
-                content.Children.Add(Section(provider));
-            }
-            foreach (var item in data.Inactive)
-            {
-                content.Children.Add(Divider());
-                content.Children.Add(InactiveRow(item));
-            }
-            content.Children.Add(Divider());
             content.Children.Add(Footer());
             Tick();
             scroller.ScrollToVerticalOffset(offset);
@@ -509,42 +512,6 @@ namespace FleetPanel
             "What the tokens in your local Claude Code and Codex logs would cost at each model's public API price. "
             + "Subscriptions don't charge per token: this is the value your plans returned.";
 
-        /// <summary>The totals band: today, 7 days and 30 days at API list prices.</summary>
-        private UIElement Band()
-        {
-            var summary = data.Summary;
-            if (!data.Cost || summary == null || summary.State == "off")
-            {
-                return null;
-            }
-            if (summary.Today == null)
-            {
-                var note = Text("Reading local agent logs…", 12, theme.TextSecondary);
-                note.Margin = new Thickness(0, 0, 0, 10);
-                return note;
-            }
-            var grid = new Grid { Margin = new Thickness(12, 12, 12, 12), ToolTip = CostNote, Background = Brushes.Transparent };
-            ToolTipService.SetInitialShowDelay(grid, 400);
-            var cells = new[]
-            {
-                ("API value today", summary.Today),
-                ("7 days", summary.Week),
-                ("30 days", summary.Month),
-            };
-            for (var i = 0; i < cells.Length; i++)
-            {
-                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(i == 0 ? 1.25 : 1, GridUnitType.Star) });
-                var cell = new StackPanel();
-                cell.Children.Add(Text(cells[i].Item1, 11, theme.TextSecondary));
-                var value = Text(cells[i].Item2 == null ? "—" : Format.Money(cells[i].Item2.Value), 20, i == 0 ? theme.Accent : theme.Text, FontWeights.SemiBold, tabular: true);
-                value.Margin = new Thickness(0, 1, 0, 0);
-                cell.Children.Add(value);
-                Grid.SetColumn(cell, i);
-                grid.Children.Add(cell);
-            }
-            return new Border { Child = grid, CornerRadius = new CornerRadius(12), Background = Brush(Theme.WithAlpha(theme.Accent, theme.Light ? 0.07 : 0.10)), Margin = new Thickness(0, 2, 0, 12) };
-        }
-
         private Border Divider() => new Border
         {
             Height = 1, Margin = new Thickness(0, 3, 0, 3), Background = Brush(theme.Divider), IsHitTestVisible = false,
@@ -573,53 +540,28 @@ namespace FleetPanel
         private sealed class SectionParts
         {
             public Reveal Reveal;
-            public RotateTransform Chevron;
             public Provider Provider;
         }
 
         private bool Expandable(Provider p) => p.AccountMode != "" || p.Groups.Any(g => g.Rows.Count > 0) && p.Kind != "balance";
 
-        private FrameworkElement Section(Provider p)
+        private FrameworkElement Section(Provider p, FrameworkElement summary)
         {
             var open = selected == p.Id;
             var parts = new SectionParts { Provider = p };
             sections[p.Id] = parts;
-            var expandable = Expandable(p);
-
-            var summary = new StackPanel();
-            summary.Children.Add(SectionHead(p, expandable, open, parts));
-            var meters = new StackPanel { Margin = new Thickness(Indent, 3, 0, 0) };
-            foreach (var row in MetersOf(p))
-            {
-                meters.Children.Add(MeterRow(row, p.FreshStale));
-            }
-            if (meters.Children.Count > 0)
-            {
-                summary.Children.Add(meters);
-            }
-            var status = StatusLine(p);
-            if (status != null)
-            {
-                summary.Children.Add(status);
-            }
-
             var hit = new Border
             {
                 Child = summary,
-                Padding = new Thickness(10, 10, 10, 10),
-                Margin = new Thickness(0, 0, 0, 7),
-                CornerRadius = new CornerRadius(11),
-                Background = Brush(theme.ControlFill),
+                Padding = new Thickness(RowPad, 7, RowPad, 7),
+                CornerRadius = new CornerRadius(8),
+                Background = Brushes.Transparent,
             };
-            if (expandable)
+            if (Expandable(p))
             {
-                hit.Cursor = Cursors.Hand;
                 AutomationName(hit, p.Name + (open ? ", details shown" : ", show details"));
-                hit.MouseEnter += (s, e) => hit.Background = Brush(theme.ControlHover);
-                hit.MouseLeave += (s, e) => hit.Background = Brush(theme.ControlFill);
-                OnClick(hit, () => Toggle(p.Id));
+                Hoverable(hit, () => Toggle(p.Id));
             }
-
             var stack = new StackPanel();
             stack.Children.Add(hit);
             parts.Reveal = new Reveal { Progress = open ? 1 : 0 };
@@ -631,115 +573,28 @@ namespace FleetPanel
             return stack;
         }
 
-        /// <summary>The limits shown while closed: the tray's choice, else every timed row.</summary>
-        private IEnumerable<Row> MetersOf(Provider p)
-        {
-            if (p.Meters.Count > 0)
-            {
-                return p.Meters;
-            }
-            if (p.Kind == "balance")
-            {
-                return Enumerable.Empty<Row>();
-            }
-            return p.Groups.SelectMany(g => g.Rows).Where(r => r.Pct != null).Take(3);
-        }
-
-        private FrameworkElement SectionHead(Provider p, bool expandable, bool open, SectionParts parts)
-        {
-            var grid = new Grid { MinHeight = 24 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Indent) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var icon = Icon(p.Icon, p.Mark, 16);
-            icon.HorizontalAlignment = HorizontalAlignment.Left;
-            grid.Children.Add(icon);
-
-            var name = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
-            name.Inlines.Add(Run(p.Name, 14, theme.Text, FontWeights.SemiBold));
-            if (p.Plan != "")
-            {
-                name.Inlines.Add(Run("  " + p.Plan, 12, theme.TextTertiary));
-            }
-            Grid.SetColumn(name, 1);
-            grid.Children.Add(name);
-
-            var right = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
-            Typography.SetNumeralAlignment(right, FontNumeralAlignment.Tabular);
-            if (data.Cost && p.Spend?.Today != null)
-            {
-                right.Inlines.Add(Run(Format.Money(p.Spend.Today.Cost), 13, theme.Text, FontWeights.SemiBold));
-                right.Inlines.Add(Run(" today", 12, theme.TextSecondary));
-            }
-            else if (p.AccountMode == "connection")
-            {
-                right.Inlines.Add(Run("View balance", 12, theme.TextSecondary));
-            }
-            else if (p.Balance != null)
-            {
-                right.Inlines.Add(Run(p.Balance.Value, 13, theme.Text, FontWeights.SemiBold));
-                right.Inlines.Add(Run(p.Balance.Label == "Credit balance" ? " credit" : " " + p.Balance.Label.ToLowerInvariant(), 12, theme.TextSecondary));
-            }
-            Grid.SetColumn(right, 2);
-            grid.Children.Add(right);
-
-            if (expandable)
-            {
-                parts.Chevron = new RotateTransform(open ? 180 : 0);
-                var chevron = new TextBlock
-                {
-                    Text = "", FontFamily = IconFont, FontSize = 10, Foreground = Brush(theme.TextTertiary),
-                    VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 1, 0, 0),
-                    RenderTransformOrigin = new Point(0.5, 0.5), RenderTransform = parts.Chevron,
-                };
-                Grid.SetColumn(chevron, 3);
-                grid.Children.Add(chevron);
-            }
-            return grid;
-        }
-
         private double Shown(double pct) => Units == "left" ? 100 - pct : pct;
 
-        private FrameworkElement MeterRow(Row row, bool stale)
+        /// <summary>A meter's figure: dollars for a dollar meter (API credits), used or
+        /// left like the bar beside it; otherwise the percentage.</summary>
+        private string Figure(Row row)
         {
-            var grid = new Grid { Height = 22 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(LabelColumn) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(54) });
-            grid.Children.Add(Text(ShortLabel(row), 12, theme.TextSecondary));
-            if (row.Pct == null)
+            if (row.Amount != null && row.AmountTotal != null)
             {
-                var value = Text(row.Value, 12, theme.Text, FontWeights.SemiBold, tabular: true);
-                value.HorizontalAlignment = HorizontalAlignment.Right;
-                Grid.SetColumn(value, 1);
-                Grid.SetColumnSpan(value, 3);
-                grid.Children.Add(value);
-                return grid;
+                var amount = Units == "left" ? Math.Max(0, row.AmountTotal.Value - row.Amount.Value) : row.Amount.Value;
+                return Format.Money(amount, compact: true);
             }
-            var pct = row.Pct.Value;
-            var meter = new Meter(theme, Shown(pct), theme.ForState(row.State), Units == "left" ? null : row.Elapsed)
-            {
-                Margin = new Thickness(6, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center,
-            };
-            Grid.SetColumn(meter, 1);
-            grid.Children.Add(meter);
-            var number = Text(Math.Round(Shown(pct)).ToString(CultureInfo.InvariantCulture) + "%", 12, theme.Text, FontWeights.SemiBold, tabular: true);
-            number.HorizontalAlignment = HorizontalAlignment.Right;
-            Grid.SetColumn(number, 2);
-            grid.Children.Add(number);
-            var reset = Text("", 12, theme.TextSecondary, tabular: true);
-            reset.HorizontalAlignment = HorizontalAlignment.Right;
-            Grid.SetColumn(reset, 3);
-            grid.Children.Add(reset);
-            tickers.Add(() => reset.Text = Clock.Left(row.ResetAt));
-            if (stale)
-            {
-                grid.Opacity = 0.55;
-            }
-            return grid;
+            return Math.Round(Shown(row.Pct ?? 0)).ToString(CultureInfo.InvariantCulture) + "%";
         }
+
+        private const string TokenLabel = "Reset tokens";
+
+        private static string ResetVerb(Row row) =>
+            row.Label == TokenLabel ? "Next one expires" : row.Label == "API credits" ? "Renews" : "Resets";
+
+        /// <summary>"1 expires Wed, Dec 2 at 7:52 AM", one line per expiry.</summary>
+        private static string TokenExpiries(Row row) => string.Join("\n",
+            row.Tokens.Select(t => Clock.Full(t.Count == 1 ? "1 expires" : t.Count + " expire", t.Expires)));
 
         private static string ShortLabel(Row row)
         {
@@ -748,71 +603,9 @@ namespace FleetPanel
             return text.EndsWith(" weekly") ? text.Substring(0, text.Length - " weekly".Length) + " wk" : text;
         }
 
-        /// <summary>One line, only when something needs attention: a stale reading, a
-        /// limit reached or almost reached, or one on course to run out early.</summary>
-        private FrameworkElement StatusLine(Provider p)
-        {
-            string glyph, text;
-            Color color;
-            if (p.FreshKind != "")
-            {
-                var at = p.FreshAt ?? Clock.Now();
-                var why = p.FreshKind != "cached" ? "From the " + p.FreshKind + " app" : p.FreshReason != "" ? p.FreshReason : "Cached";
-                glyph = "";
-                color = theme.TextSecondary;
-                text = why + " · " + Clock.Age(at) + " old";
-                if (!p.FreshStale && p.FreshKind == "cached" && p.FreshReason == "")
-                {
-                    return null;
-                }
-            }
-            else
-            {
-                var c = p.Caption;
-                if (c == null || (c.Tone != "warn" && c.Tone != "high"))
-                {
-                    return null;
-                }
-                switch (c.Kind)
-                {
-                    case "full":
-                        glyph = "";
-                        color = theme.CriticalText;
-                        text = c.Label + " limit reached · resets " + Clock.In(c.At);
-                        break;
-                    case "runout":
-                        glyph = "";
-                        color = theme.CautionText;
-                        text = c.Label + " runs out " + Clock.Soon(c.At) + " at this pace";
-                        break;
-                    case "reset":
-                        glyph = "";
-                        color = theme.CriticalText;
-                        text = c.Label + " almost used up · resets " + Clock.In(c.At);
-                        break;
-                    default:
-                        return null;
-                }
-            }
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(Indent, 4, 0, 0) };
-            row.Children.Add(new TextBlock
-            {
-                Text = glyph, FontFamily = IconFont, FontSize = 12, Foreground = Brush(color),
-                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 1, 6, 0),
-            });
-            var label = Text(text, 12, theme.TextSecondary);
-            row.Children.Add(label);
-            if (p.FreshKind == "" && p.Caption != null)
-            {
-                var caption = p.Caption;
-                tickers.Add(() =>
-                {
-                    if (caption.Kind == "full") label.Text = caption.Label + " limit reached · resets " + Clock.In(caption.At);
-                    else if (caption.Kind == "reset") label.Text = caption.Label + " almost used up · resets " + Clock.In(caption.At);
-                });
-            }
-            return row;
-        }
+        /// <summary>True while the provider says one of its reset tokens could be redeemed now.</summary>
+        private static bool TokenUsable(Provider p) =>
+            p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).Any(r => r.Label == TokenLabel && r.Usable > 0);
 
         // ---------- an open section ----------
 
@@ -834,7 +627,6 @@ namespace FleetPanel
         {
             var body = Expanded(parts.Provider);
             parts.Reveal.Child = body;
-            parts.Chevron?.BeginAnimation(RotateTransform.AngleProperty, Anim(parts.Chevron.Angle, 180, 200, 0, Decelerate));
             if (!Motion)
             {
                 parts.Reveal.Progress = 1;
@@ -848,7 +640,6 @@ namespace FleetPanel
 
         private void Collapse(SectionParts parts)
         {
-            parts.Chevron?.BeginAnimation(RotateTransform.AngleProperty, Anim(parts.Chevron.Angle, 0, 200, 0, Decelerate));
             if (!Motion || parts.Reveal.Child == null)
             {
                 parts.Reveal.BeginAnimation(Reveal.ProgressProperty, null);
@@ -871,13 +662,14 @@ namespace FleetPanel
         }
 
         /// <summary>
-        /// The open section: the last day's activity, then a two-column sheet of the
-        /// figures behind the meters: burn rate, spend per span, models, projects, and
-        /// how every limit is pacing.
+        /// The open section, the whole deal for one account: every limit with how it
+        /// is pacing and when it resets, its reset tokens and API credits, then the
+        /// last day's activity and a sheet of the figures behind it: plan, burn rate,
+        /// spend per span, models and projects.
         /// </summary>
         private FrameworkElement Expanded(Provider p)
         {
-            var stack = new StackPanel { Margin = new Thickness(Indent, 2, 0, 10), Background = Brushes.Transparent };
+            var stack = new StackPanel { Margin = new Thickness(RowPad + Indent, 0, RowPad, 10), Background = Brushes.Transparent };
             if (p.AccountMode != "")
             {
                 if (p.AccountMode == "spend")
@@ -903,10 +695,26 @@ namespace FleetPanel
                 stack.Children.Add(Button("Open billing", "View prepaid credits in Claude Console", () => ActionClicked?.Invoke("anthropic-billing")));
                 return stack;
             }
-            var spend = data.Cost ? p.Spend : null;
-            if (spend != null && spend.Hourly.Count > 1 && spend.Hourly.Any(v => v > 0))
+            var limits = Limits(p);
+            if (limits != null)
             {
-                var top = new Grid { Margin = new Thickness(0, 4, 0, 6) };
+                stack.Children.Add(limits);
+            }
+            var tokens = p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).FirstOrDefault(r => r.Label == TokenLabel && r.Count > 0);
+            if (tokens != null)
+            {
+                stack.Children.Add(Tokens(p, tokens));
+            }
+            var credits = p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).FirstOrDefault(r => r.Label == "API credits");
+            if (credits != null || p.Note != "")
+            {
+                stack.Children.Add(Credits(p, credits));
+            }
+            var spend = data.Cost ? p.Spend : null;
+            var charted = spend != null && spend.Hourly.Count > 1 && spend.Hourly.Any(v => v > 0);
+            if (charted)
+            {
+                var top = new Grid { Margin = new Thickness(0, stack.Children.Count > 0 ? 14 : 4, 0, 6) };
                 top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
                 top.Children.Add(Text("Last 24 hours at API prices", 12, theme.TextSecondary));
@@ -932,9 +740,13 @@ namespace FleetPanel
                 stack.Children.Add(axis);
             }
 
-            var sheet = new Grid();
+            var sheet = new Grid { Margin = new Thickness(0, stack.Children.Count > 0 && !charted ? 10 : 0, 0, 0) };
             sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(KeyColumn) });
             sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            if (p.Plan != "")
+            {
+                Pair(sheet, "Plan", Value(p.Plan));
+            }
             if (spend != null)
             {
                 if (spend.CostPerHour != null && spend.CostPerHour > 0)
@@ -972,11 +784,6 @@ namespace FleetPanel
                 }
             }
             stack.Children.Add(sheet);
-            var limits = Limits(p);
-            if (limits != null)
-            {
-                stack.Children.Add(limits);
-            }
             if (spend != null && spend.Estimated)
             {
                 var note = Text("Some models priced by their family's rate.", 11, theme.TextTertiary);
@@ -984,6 +791,93 @@ namespace FleetPanel
                 stack.Children.Add(note);
             }
             return stack;
+        }
+
+        /// <summary>
+        /// An account's reset tokens one by one: when each expires, as a time and a
+        /// countdown, and where to redeem them.
+        /// </summary>
+        private FrameworkElement Tokens(Provider p, Row row)
+        {
+            var block = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+            var sheet = new Grid();
+            sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(KeyColumn) });
+            sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var count = Value(row.Count.ToString(CultureInfo.InvariantCulture) + " waiting");
+            if (row.Usable > 0)
+            {
+                count.Inlines.Add(Run(" · " + (row.Usable >= row.Count ? "usable now" : row.Usable + " usable now"), 12, theme.Accent, FontWeights.SemiBold));
+            }
+            Pair(sheet, TokenLabel, count);
+            foreach (var token in row.Tokens)
+            {
+                var expires = Value(Clock.When(token.Expires));
+                var countdown = Run("", 12, theme.TextSecondary);
+                expires.Inlines.Add(countdown);
+                var at = token.Expires;
+                var many = token.Count > 1 ? " · " + token.Count + " tokens" : "";
+                tickers.Add(() => countdown.Text = " · in " + Clock.Left(at) + many);
+                expires.ToolTip = Clock.Full(token.Count == 1 ? "Expires" : token.Count + " expire", at) + ". Unused tokens are lost then.";
+                Pair(sheet, "Expires", expires);
+            }
+            block.Children.Add(sheet);
+            var note = Text("Redeem one in " + RedeemIn(p.Name) + "; Fleet only reads them.", 12, theme.TextSecondary);
+            note.TextWrapping = TextWrapping.Wrap;
+            note.TextTrimming = TextTrimming.None;
+            note.Margin = new Thickness(0, 4, 0, 0);
+            block.Children.Add(note);
+            return block;
+        }
+
+        private const string OpenAiAdmin = "openai-admin";
+
+        /// <summary>
+        /// A ChatGPT plan's API credits: what is left and when they renew, how Fleet
+        /// counts them, and the way to the real balance in OpenAI billing.
+        /// </summary>
+        private FrameworkElement Credits(Provider p, Row credits)
+        {
+            var block = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+            if (credits != null)
+            {
+                var sheet = new Grid();
+                sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(KeyColumn) });
+                sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                Pair(sheet, "API credits", Value(credits.Value));
+                if (credits.ResetAt != null)
+                {
+                    var renews = Value(Clock.When(credits.ResetAt));
+                    var countdown = Run("", 12, theme.TextSecondary);
+                    renews.Inlines.Add(countdown);
+                    var at = credits.ResetAt;
+                    tickers.Add(() => countdown.Text = " · in " + Clock.Left(at));
+                    renews.ToolTip = Clock.Full("Renews", at) + ". Unused credits don't roll over.";
+                    Pair(sheet, "Renews", renews);
+                }
+                block.Children.Add(sheet);
+            }
+            if (p.Note != "")
+            {
+                var note = Text(p.Note, 12, theme.TextSecondary);
+                note.TextWrapping = TextWrapping.Wrap;
+                note.TextTrimming = TextTrimming.None;
+                note.Margin = new Thickness(0, 4, 0, 8);
+                block.Children.Add(note);
+            }
+            if (credits != null)
+            {
+                var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+                buttons.Children.Add(Button("Open billing", "See the API credit balance in OpenAI Platform billing",
+                    () => ActionClicked?.Invoke("openai-billing")));
+                if (!data.ApiAccounts.TryGetValue(OpenAiAdmin, out var source) || source == "")
+                {
+                    var add = Button("Add admin key", "Save an admin key for the linked OpenAI API organization", ShowSettings);
+                    add.Margin = new Thickness(6, 0, 0, 0);
+                    buttons.Children.Add(add);
+                }
+                block.Children.Add(buttons);
+            }
+            return block;
         }
 
         private static TextBlock Rich()
@@ -1032,23 +926,27 @@ namespace FleetPanel
         /// </summary>
         private FrameworkElement Limits(Provider p)
         {
-            var rows = p.Groups.SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r })).ToList();
+            // API credits without a balance are only a sentence, and reset tokens get
+            // their own block: those blocks say it.
+            var rows = p.Groups.SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r }))
+                .Where(x => !(x.Row.Label == "API credits" && x.Row.Pct == null) && !(x.Row.Label == TokenLabel && x.Row.Count > 0))
+                .ToList();
             if (rows.Count == 0)
             {
                 return null;
             }
-            var table = new Grid { Margin = new Thickness(0, p.Spend != null && data.Cost ? 10 : 2, 0, 0) };
-            foreach (var width in new[] { 54.0, 34, 40, -1, 72 })
+            var table = new Grid { Margin = new Thickness(0, 2, 0, 0) };
+            foreach (var width in new[] { 74.0, 36, -1, 80 })
             {
                 table.ColumnDefinitions.Add(new ColumnDefinition { Width = width < 0 ? new GridLength(1, GridUnitType.Star) : new GridLength(width) });
             }
-            var head = new[] { "Limit", "Used", "Rate", "Pace", "Resets" };
+            var head = new[] { "Limit", Units == "left" ? "Left" : "Used", "Pace", "Resets" };
             table.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             for (var c = 0; c < head.Length; c++)
             {
                 var cell = Text(head[c], 11, theme.TextTertiary);
-                cell.Margin = new Thickness(c == 3 ? 8 : 0, 0, 0, 3);
-                cell.HorizontalAlignment = c == 1 || c == 2 || c == 4 ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+                cell.Margin = new Thickness(c == 2 ? 10 : 0, 0, 0, 3);
+                cell.HorizontalAlignment = c == 1 || c == 3 ? HorizontalAlignment.Right : HorizontalAlignment.Left;
                 Grid.SetColumn(cell, c);
                 table.Children.Add(cell);
             }
@@ -1057,29 +955,48 @@ namespace FleetPanel
                 var row = item.Row;
                 var r = table.RowDefinitions.Count;
                 table.RowDefinitions.Add(new RowDefinition { Height = new GridLength(20) });
-                var label = (item.Group != "" ? item.Group + " " : "") + ShortLabel(row).ToLowerInvariant();
+                var name = ShortLabel(row);
+                var label = item.Group != "" ? item.Group + " " + LowerFirst(name) : name;
                 label = label.Length > 0 ? char.ToUpperInvariant(label[0]) + label.Substring(1) : "Usage";
-                Cell(table, r, 0, Text(label, 12, theme.TextSecondary), HorizontalAlignment.Left);
+                var labelCell = Text(label, 12, theme.TextSecondary);
+                labelCell.ToolTip = label;
+                Cell(table, r, 0, labelCell, HorizontalAlignment.Left);
                 if (row.Pct == null)
                 {
                     var value = Text(row.Value, 12, theme.Text, FontWeights.SemiBold, tabular: true);
-                    Grid.SetColumnSpan(value, 4);
+                    Grid.SetColumnSpan(value, 3);
                     Cell(table, r, 1, value, HorizontalAlignment.Right);
                     continue;
                 }
                 Cell(table, r, 1, Text(Math.Round(Shown(row.Pct.Value)).ToString(CultureInfo.InvariantCulture) + "%", 12, theme.Text, FontWeights.SemiBold, tabular: true), HorizontalAlignment.Right);
-                var rate = row.Rate != null && row.Rate >= 0.5 ? Math.Round(row.Rate.Value).ToString(CultureInfo.InvariantCulture) + "%/h" : "—";
-                Cell(table, r, 2, Text(rate, 12, theme.TextSecondary, tabular: true), HorizontalAlignment.Right);
                 var pace = Pace(row, out var tone);
                 var paceCell = Text(pace, 12, tone);
-                paceCell.Margin = new Thickness(8, 0, 0, 0);
-                Cell(table, r, 3, paceCell, HorizontalAlignment.Left);
+                paceCell.Margin = new Thickness(10, 0, 0, 0);
+                // Fleet's own readings say how fast it is filling lately.
+                var rate = row.Rate != null && row.Rate >= 0.5 ? "Lately " + Math.Round(row.Rate.Value).ToString(CultureInfo.InvariantCulture) + "% an hour" : "";
+                var paceTip = row.RunoutAt != null ? "At this pace it is used up " + Clock.Full("on", row.RunoutAt) + ", before it resets" : "";
+                paceTip = string.Join(". ", new[] { paceTip, rate }.Where(t => t != ""));
+                if (paceTip != "")
+                {
+                    paceCell.ToolTip = paceTip + ".";
+                    ToolTipService.SetInitialShowDelay(paceCell, 400);
+                }
+                Cell(table, r, 2, paceCell, HorizontalAlignment.Left);
                 var reset = Text("", 12, theme.TextSecondary, tabular: true);
                 tickers.Add(() => reset.Text = row.ResetAt == null ? "" : Clock.Day(row.ResetAt));
-                Cell(table, r, 4, reset, HorizontalAlignment.Right);
+                if (row.ResetAt != null)
+                {
+                    reset.ToolTip = Clock.Full(ResetVerb(row), row.ResetAt);
+                    ToolTipService.SetInitialShowDelay(reset, 400);
+                }
+                Cell(table, r, 3, reset, HorizontalAlignment.Right);
             }
             return table;
         }
+
+        /// <summary>"Weekly" to "weekly" after a group name; an acronym ("API credits") stays.</summary>
+        private static string LowerFirst(string text) =>
+            text.Length > 1 && char.IsUpper(text[1]) ? text : text.Length > 0 ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text;
 
         private static void Cell(Grid table, int row, int column, FrameworkElement element, HorizontalAlignment align)
         {
@@ -1089,7 +1006,7 @@ namespace FleetPanel
             table.Children.Add(element);
         }
 
-        /// <summary>"runs out ~11:58 PM", "26% ahead", "45% under", "on pace".</summary>
+        /// <summary>"runs out 11:58 PM", "26% ahead", "45% under", "on pace".</summary>
         private string Pace(Row row, out Color tone)
         {
             tone = theme.TextSecondary;
@@ -1101,7 +1018,7 @@ namespace FleetPanel
             if (row.RunoutAt != null)
             {
                 tone = theme.CautionText;
-                return "runs out " + Clock.Soon(row.RunoutAt);
+                return "runs out " + Clock.Day(row.RunoutAt);
             }
             if (row.Pct == 0)
             {
@@ -1195,14 +1112,21 @@ namespace FleetPanel
                 () => ActionClicked?.Invoke("anthropic-billing"));
             billingLink.Margin = new Thickness(0, 6, 0, 0);
             stack.Children.Add(billingLink);
-            if (apiFeedback != "")
-            {
-                var feedback = Text(apiFeedback, 12, theme.TextSecondary);
-                feedback.TextWrapping = TextWrapping.Wrap;
-                feedback.TextTrimming = TextTrimming.None;
-                feedback.Margin = new Thickness(0, 4, 0, 4);
-                stack.Children.Add(feedback);
-            }
+            if (apiFeedbackId != OpenAiAdmin) AddApiFeedback(stack);
+
+            stack.Children.Add(SectionLabel("ChatGPT API credits", first: false));
+            var creditNote = Text("Pro includes monthly OpenAI API credits that expire on your ChatGPT billing date. "
+                + "An admin key for the API organization they go to lets Fleet show how much is left.", 12, theme.TextSecondary);
+            creditNote.TextWrapping = TextWrapping.Wrap;
+            creditNote.TextTrimming = TextTrimming.None;
+            creditNote.Margin = new Thickness(0, 0, 0, 6);
+            stack.Children.Add(creditNote);
+            stack.Children.Add(ApiKeyRow(OpenAiAdmin, "Admin key"));
+            var openAiBilling = Button("Open billing", "View the API credit balance in OpenAI Platform billing; no saved key required",
+                () => ActionClicked?.Invoke("openai-billing"));
+            openAiBilling.Margin = new Thickness(0, 6, 0, 0);
+            stack.Children.Add(openAiBilling);
+            if (apiFeedbackId == OpenAiAdmin) AddApiFeedback(stack);
 
             stack.Children.Add(SectionLabel("Tray icon", first: false));
             stack.Children.Add(Segmented(new[] { ("bars", "Bars"), ("ring", "Ring"), ("number", "Number") }, data.TrayIcon, value =>
@@ -1243,6 +1167,20 @@ namespace FleetPanel
             return stack;
         }
 
+        /// <summary>The last key action's result, under the section it belongs to.</summary>
+        private void AddApiFeedback(StackPanel stack)
+        {
+            if (apiFeedback == "")
+            {
+                return;
+            }
+            var feedback = Text(apiFeedback, 12, theme.TextSecondary);
+            feedback.TextWrapping = TextWrapping.Wrap;
+            feedback.TextTrimming = TextTrimming.None;
+            feedback.Margin = new Thickness(0, 4, 0, 4);
+            stack.Children.Add(feedback);
+        }
+
         private UIElement ApiKeyRow(string id, string title)
         {
             data.ApiAccounts.TryGetValue(id, out var source);
@@ -1268,6 +1206,7 @@ namespace FleetPanel
                         var error = CredentialChanged?.Invoke(id, null) ?? "Key storage is unavailable.";
                         if (error == "") data.ApiAccounts[id] = "";
                         apiFeedback = error == "" ? "Saved key removed." : error;
+                        apiFeedbackId = id;
                         apiEditing = "";
                         Rebuild();
                     });
@@ -1302,6 +1241,7 @@ namespace FleetPanel
                     apiEditing = "";
                 }
                 apiFeedback = error == "" ? "Key saved. Checking connection…" : error;
+                apiFeedbackId = id;
                 Rebuild();
             };
             buttons.Children.Add(Button("Save key", "Save securely and refresh usage", save));

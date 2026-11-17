@@ -49,6 +49,11 @@ WM_FLEET_TOGGLE = 0x8000 + 0x46
 WM_FLEET_DATA = 0x8000 + 0x47
 WM_FLEET_SETTINGS = 0x8000 + 0x48
 WM_FLEET_DASHBOARD = 0x8000 + 0x49
+# The pointer is on the icon: the panel draws itself once off screen before the click.
+WM_FLEET_WARM = 0x8000 + 0x4A
+WM_MOUSEMOVE = 0x0200
+WARM_EVERY_SECS = 15
+_WARMED = {"at": float("-inf")}
 _LAST_POLL = time.time()
 _UI_ACK = {"ts": 0.0, "registered": False}
 _FAULT_FILE = None
@@ -513,6 +518,20 @@ def open_panel(icon=None, page=None):
         ensure_panel_host(show=True, icon=icon)
 
 
+def warm_panel(icon=None):
+    """The pointer reached the tray icon, so a click is likely: ask the panel to
+    draw itself once where nobody sees it, waking what sat idle, before the click
+    lands. At most every WARM_EVERY_SECS; the panel ignores it while open."""
+    now = time.monotonic()
+    if now - _WARMED["at"] < WARM_EVERY_SECS:
+        return False
+    _WARMED["at"] = now
+    process = _PANEL_PROCESS
+    if process is None or process.poll() is not None:
+        return False
+    return _post_panel(WM_FLEET_WARM, int(getattr(icon, "_hwnd", 0) or 0))
+
+
 def run_panel_host():
     # Keep a handle to the actual parent: no orphan flyout after a tray crash.
     parent_pid = os.environ.get("FLEET_PARENT_PID")
@@ -876,7 +895,26 @@ def _new_tray_icon():
                          tray_glyph.tooltip(model, current), build_menu())
     icon.fleet_glyph = glyph
     icon._message_handlers[_WM_HEARTBEAT] = lambda w, l: _heartbeat(icon)
+    _watch_hover(icon)
     return icon
+
+
+def _watch_hover(icon):
+    """Hovering the icon warms the panel; pystray only acts on button releases."""
+    from pystray._util import win32 as pwin32
+    notify = icon._message_handlers.get(pwin32.WM_NOTIFY)
+    if notify is None:
+        return
+
+    def on_notify(wparam, lparam):
+        if lparam == WM_MOUSEMOVE:
+            try:
+                warm_panel(icon)
+            except Exception as exc:
+                _log_runtime_exception("panel warm-up failed", exc)
+        return notify(wparam, lparam)
+
+    icon._message_handlers[pwin32.WM_NOTIFY] = on_notify
 
 
 def run_tray(stop_event=None, icon_factory=None):
