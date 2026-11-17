@@ -79,14 +79,6 @@ namespace FleetPanel
                     p.FreshAt = Num(fresh, "at");
                     p.FreshStale = fresh.TryGetValue("stale", out var st) && st is bool stale && stale;
                 }
-                if (item.TryGetValue("caption", out var c) && c is Dictionary<string, object> caption)
-                {
-                    p.Caption = new Caption
-                    {
-                        Kind = Str(caption, "kind"), Label = Str(caption, "label"), Text = Str(caption, "text"),
-                        Tone = Str(caption, "tone"), At = Num(caption, "at"),
-                    };
-                }
                 if (item.TryGetValue("balance", out var b) && b is Dictionary<string, object> balance)
                 {
                     p.Balance = new Balance { Value = Str(balance, "value"), Label = Str(balance, "label") };
@@ -108,9 +100,18 @@ namespace FleetPanel
                     }
                     p.Groups.Add(group);
                 }
-                foreach (var r in List(item, "meters"))
+                if (item.TryGetValue("glance", out var gl) && gl is Dictionary<string, object> glance
+                    && glance.TryGetValue("row", out var gr) && gr is Dictionary<string, object> glanceRow)
                 {
-                    p.Meters.Add(ParseRow(r));
+                    p.Glance = new Glance
+                    {
+                        Row = ParseRow(glanceRow),
+                        Blocked = glance.TryGetValue("blocked", out var bl) && bl is bool blocked && blocked,
+                    };
+                    foreach (var a in List(glance, "alerts"))
+                    {
+                        p.Glance.Alerts.Add(new GlanceAlert { Kind = Str(a, "kind"), Label = Str(a, "label"), At = Num(a, "at") });
+                    }
                 }
                 foreach (var g in List(item, "all_groups"))
                 {
@@ -308,13 +309,13 @@ namespace FleetPanel
         public string AccountMode = "";
         /// <summary>A sentence about a figure that needs one (how API credits are counted).</summary>
         public string Note = "";
-        public Caption Caption;
         public Balance Balance;
         public List<Ring> Rings = new List<Ring>();
         public List<Group> Groups = new List<Group>();
         public List<Group> AllGroups = new List<Group>();
-        /// <summary>The limits shown while the section is closed; every row is also in Groups.</summary>
-        public List<Row> Meters = new List<Row>();
+        /// <summary>The closed account: the limit that stops it first and what needs attention.
+        /// Null for an account without limits (a balance, a month's spend).</summary>
+        public Glance Glance;
         public Spend Spend;
     }
 
@@ -363,9 +364,18 @@ namespace FleetPanel
         public double? ResetAt, Window, Elapsed;
     }
 
-    internal sealed class Caption
+    internal sealed class Glance
     {
-        public string Kind = "", Label = "", Text = "", Tone = "";
+        public Row Row;
+        /// <summary>A used-up limit stops the whole account until Row resets.</summary>
+        public bool Blocked;
+        public List<GlanceAlert> Alerts = new List<GlanceAlert>();
+    }
+
+    /// <summary>"full", "high" or "runout", the limit it is about, and when.</summary>
+    internal sealed class GlanceAlert
+    {
+        public string Kind = "", Label = "";
         public double? At;
     }
 

@@ -81,6 +81,40 @@ class InstantClickTests(unittest.TestCase):
         heartbeat.write_text(json.dumps({"pid": pid, "hwnd": hwnd, "ts": time.time()}))
         return heartbeat, mock.Mock(pid=pid, poll=mock.Mock(return_value=None))
 
+    def test_hovering_the_icon_warms_the_panel_at_most_every_few_seconds(self):
+        posted = []
+        host = mock.Mock(pid=777, poll=mock.Mock(return_value=None))
+        with mock.patch.object(tray, "_PANEL_PROCESS", host), mock.patch.object(
+            tray, "_post_panel", side_effect=lambda message, w=0, l=0: posted.append((message, w)) or True
+        ), mock.patch.dict(tray._WARMED, {"at": float("-inf")}), mock.patch.object(
+            tray.time, "monotonic", side_effect=[100.0, 101.0, 100.0 + tray.WARM_EVERY_SECS]
+        ):
+            icon = mock.Mock(_hwnd=99)
+            self.assertTrue(tray.warm_panel(icon))
+            self.assertFalse(tray.warm_panel(icon))
+            self.assertTrue(tray.warm_panel(icon))
+
+        self.assertEqual(posted, [(tray.WM_FLEET_WARM, 99), (tray.WM_FLEET_WARM, 99)])
+
+    def test_the_hover_hook_keeps_pystrays_clicks(self):
+        from pystray._util import win32 as pwin32
+        clicks = []
+        icon = mock.Mock(_message_handlers={pwin32.WM_NOTIFY: lambda w, l: clicks.append(l) or 0})
+        with mock.patch.object(tray, "warm_panel") as warm:
+            tray._watch_hover(icon)
+            handler = icon._message_handlers[pwin32.WM_NOTIFY]
+            handler(0, tray.WM_MOUSEMOVE)
+            handler(0, pwin32.WM_LBUTTONUP)
+
+        warm.assert_called_once_with(icon)
+        self.assertEqual(clicks, [tray.WM_MOUSEMOVE, pwin32.WM_LBUTTONUP])
+
+    def test_no_warm_up_without_a_running_panel(self):
+        with mock.patch.object(tray, "_PANEL_PROCESS", None), mock.patch.dict(
+            tray._WARMED, {"at": float("-inf")}
+        ), mock.patch.object(tray, "_post_panel", side_effect=AssertionError("posted")):
+            self.assertFalse(tray.warm_panel(mock.Mock(_hwnd=99)))
+
     def test_a_click_is_one_window_message_not_a_file(self):
         with tempfile.TemporaryDirectory() as temp:
             heartbeat, host = self._host(temp)

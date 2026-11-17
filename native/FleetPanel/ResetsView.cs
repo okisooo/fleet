@@ -17,10 +17,10 @@ namespace FleetPanel
     // them out and ticks the clocks.
     internal sealed partial class PanelView
     {
-        /// <summary>Lines the closed card shows: the very next reset, then used-up limits
-        /// (what you are waiting for), then the next soonest. Three keep the flyout
-        /// within a 1080p screen; the rest open in place, all in time order.</summary>
-        private const int ResetsClosed = 3;
+        /// <summary>Lines the closed card shows, the reset-token line included: the next
+        /// resets in time order (the accounts above already say which are used up).
+        /// The rest open in place.</summary>
+        private const int ResetsClosed = 5;
         private bool resetsOpen;
 
         private List<ResetLine> UpcomingResets()
@@ -41,12 +41,7 @@ namespace FleetPanel
             // for the tokens' own expiry lines until the card is opened.
             var room = ResetsClosed - (tokens ? 1 : 0);
             var limits = tokens ? lines.Where(l => l.Kind != "expiry").ToList() : lines;
-            var keep = new HashSet<ResetLine>(limits.Take(Math.Min(1, room)));
-            foreach (var line in limits.Where(l => l.State == "full").Concat(limits))
-            {
-                if (keep.Count >= room) break;
-                keep.Add(line);
-            }
+            var keep = new HashSet<ResetLine>(limits.Take(room));
             var more = lines.Count - keep.Count;
 
             var head = new Grid { MinHeight = 24 };

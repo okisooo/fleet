@@ -23,7 +23,7 @@ model = json.loads(fixture.read_text())
 import clr
 for name in ('WindowsBase', 'PresentationCore', 'PresentationFramework'):
     clr.AddReference(str(Path(r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF')/(name+'.dll')))
-from System import Activator, AppDomain, Array, Boolean, EventHandler, GC, Object, TimeSpan
+from System import Activator, AppDomain, Array, Boolean, DateTime, EventHandler, GC, Object, TimeSpan
 from System.Reflection import Assembly, BindingFlags
 from System.Threading import ApartmentState, Thread, ThreadStart
 from System.Windows import Application, ShutdownMode
@@ -148,6 +148,24 @@ def run():
                 sample(i)
                 (out/'progress.json').write_text(json.dumps(samples, indent=2))
         checks.append('100 open/close and usage/dashboard/settings navigation cycles complete')
+        if any(m.Name == 'Warm' for m in parent.GetType().GetMethods(flags)):
+            # Hovering the tray icon draws the flyout once off screen; a click that
+            # lands mid-warm-up opens it normally, and a finished one leaves it at rest.
+            call(parent, 'Warm')
+            assert field(parent, 'warming') and not field(parent, 'open')
+            pump(60)
+            call(parent, 'Toggle')
+            assert field(parent, 'open') and not field(parent, 'warming')
+            pump(360)
+            call(parent, 'Close', Boolean(False))
+            pump(80)
+            parent.GetType().GetField('warmedAt', flags).SetValue(parent, DateTime.MinValue)
+            call(parent, 'Warm')
+            pump(400)
+            assert not field(parent, 'warming') and not field(parent, 'open')
+            call(parent, 'Warm')  # within ten seconds of the last: ignored
+            assert not field(parent, 'warming')
+            checks.append('a hover warm-up rests by itself, and a click during it opens the flyout')
         call(parent, 'Close')  # Window.Close, not the private Close(bool)
         pump(200)
         sample(101)

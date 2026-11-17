@@ -10,9 +10,10 @@
 
 track Claude Code, OpenAI Codex, Grok CLI, Google Antigravity, and API providers
 without opening each service. a tray meter tracks quota pressure; the native flyout
-brings limits, reset times, pace, balances, and what your tokens would cost at API
-prices together. choose **Dashboard** to switch to a detailed page inside the
-same popup. readings are marked **live, cached, or unavailable**, so an
+puts the important first: each account's tightest limit with the exact time it
+resets, then every reset in time order, then balances and what your tokens would
+cost at API prices. click an account for all its limits, pace and spend, or choose
+**Dashboard** to switch to a detailed page inside the same popup. readings are marked **live, cached, or unavailable**, so an
 older result stays visibly older.
 
 <p align="center">
@@ -72,9 +73,10 @@ keep `_internal` beside `Fleet.exe` when upgrading a portable copy.
 | **opt-in probes** | rate-limit headers from OpenAI, Anthropic, and other supported APIs; real inference requests that may cost money |
 | **custom providers** | map an HTTPS JSON usage endpoint for a gateway, proxy, or self-hosted service |
 
-balances stay in the flyout; repeated zero-use quota windows collapse. support
-and metrics vary by provider. see the [provider matrix and limitations](docs/providers.md),
-including unsupported Gemini API keys and console-only dashboards.
+balances stay in the flyout; each account shows its tightest limit until you
+click it. support and metrics vary by provider. see the
+[provider matrix and limitations](docs/providers.md), including unsupported Gemini
+API keys and console-only dashboards.
 
 ## quick start
 

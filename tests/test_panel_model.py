@@ -402,5 +402,95 @@ class DashboardModelTests(unittest.TestCase):
         self.assertEqual([row["rate"] for row in rows], [None, None])
 
 
+class GlanceTests(unittest.TestCase):
+    """Schema 6: what a closed account shows, the binding limit and its alerts."""
+
+    WEEK = 7 * 86400
+
+    def glance(self, agent, name="Claude", metrics=()):
+        model = panel_model.build([dict({"agent": name, "err": "", "metrics": list(metrics)}, **agent)], 1000.0, now=1000.0)
+        json.dumps(model)
+        return model["providers"][0]["glance"]
+
+    def test_a_closed_account_shows_its_fullest_all_model_limit(self):
+        glance = self.glance({}, metrics=[_metric("Session", 30, 1000 + 3600), _metric("Weekly", 47, 1000 + 86400)])
+
+        self.assertEqual((glance["row"]["short"], glance["row"]["pct"], glance["row"]["reset_at"]), ("Weekly", 47, 1000 + 86400))
+        self.assertFalse(glance["blocked"])
+        self.assertEqual(glance["alerts"], [])
+
+    def test_a_used_up_all_model_limit_blocks_the_account_until_it_resets(self):
+        glance = self.glance({}, metrics=[
+            _metric("Session", 0), _metric("Weekly", 100, 1000 + 86400), _metric("Fable", 100, 1000 + 86400)])
+
+        self.assertTrue(glance["blocked"])
+        self.assertEqual((glance["row"]["short"], glance["row"]["reset_at"]), ("Weekly", 1000 + 86400))
+        # The model's own limit is back with the account: nothing more to say.
+        self.assertEqual(glance["alerts"], [])
+
+    def test_with_two_used_up_windows_the_account_waits_for_the_later_reset(self):
+        glance = self.glance({}, metrics=[_metric("Session", 100, 1000 + 3600), _metric("Weekly", 100, 1000 + 86400)])
+
+        self.assertTrue(glance["blocked"])
+        self.assertEqual(glance["row"]["short"], "Weekly")
+
+    def test_a_used_up_model_limit_is_an_alert_not_a_block(self):
+        glance = self.glance({}, metrics=[
+            _metric("Session", 15, 1000 + 3600), _metric("Weekly", 60, 1000 + 86400), _metric("Fable", 100, 1000 + 2 * 86400)])
+
+        self.assertFalse(glance["blocked"])
+        self.assertEqual(glance["row"]["short"], "Weekly")
+        self.assertEqual(glance["alerts"], [{"kind": "full", "label": "Fable weekly", "at": 1000 + 2 * 86400}])
+
+    def test_a_limit_on_course_to_run_out_before_its_reset_is_an_alert(self):
+        # A sixth of the week gone and 80% used: at this rate it is empty in hours.
+        glance = self.glance({}, name="Codex", metrics=[_metric("Weekly", 80, 1000 + self.WEEK * 5 / 6)])
+
+        self.assertEqual(glance["row"]["short"], "Weekly")
+        self.assertEqual([(a["kind"], a["label"]) for a in glance["alerts"]], [("runout", "Weekly")])
+        self.assertLess(glance["alerts"][0]["at"], 1000 + self.WEEK * 5 / 6)
+
+    def test_a_nearly_used_up_window_beside_the_binding_one_is_an_alert(self):
+        glance = self.glance({}, metrics=[_metric("Session", 92, 1000 + 600), _metric("Weekly", 95, 1000 + 86400)])
+
+        self.assertEqual(glance["row"]["short"], "Weekly")
+        self.assertEqual([(a["kind"], a["label"]) for a in glance["alerts"]], [("high", "5-hour")])
+
+    def test_a_run_out_replaces_almost_used_up_for_the_same_window(self):
+        # 92% with most of the window still to go: it runs dry well before 2:00.
+        glance = self.glance({}, metrics=[_metric("Session", 92, 1000 + 3600), _metric("Weekly", 95, 1000 + 86400)])
+
+        self.assertEqual([(a["kind"], a["label"]) for a in glance["alerts"]], [("runout", "5-hour")])
+
+    def test_model_families_are_separate_pools(self):
+        metrics = [{"label": "Weekly", "pct": 100, "resets": 1000 + 86400, "group": "Gemini", "window": "weekly"},
+                   {"label": "Weekly", "pct": 40, "resets": 1000 + 2 * 86400, "group": "Claude & GPT", "window": "weekly"}]
+        glance = self.glance({}, name="Antigrav", metrics=metrics)
+
+        # Gemini is used up, Claude & GPT is not: the account still works.
+        self.assertFalse(glance["blocked"])
+        self.assertEqual((glance["row"]["short"], glance["row"]["pct"]), ("Claude & GPT weekly", 40))
+        self.assertEqual(glance["alerts"], [{"kind": "full", "label": "Gemini weekly", "at": 1000 + 86400}])
+
+        metrics[1]["pct"] = 100
+        glance = self.glance({}, name="Antigrav", metrics=metrics)
+        # Every family used up: back when the first one resets.
+        self.assertTrue(glance["blocked"])
+        self.assertEqual((glance["row"]["short"], glance["row"]["reset_at"]), ("Gemini weekly", 1000 + 86400))
+
+    def test_reset_tokens_and_api_credits_are_not_limits(self):
+        glance = self.glance({"plan": "prolite"}, name="Codex", metrics=[
+            _metric("Weekly", 24.0, 1000.0 + 86400), _metric("Resets", None, None, "1 available · until Nov 30"),
+            {"label": fleet.API_CREDITS, "pct": None, "resets": 1000.0 + 20 * 86400, "extra": "$100 a month"}])
+
+        self.assertEqual(glance["row"]["short"], "Weekly")
+
+    def test_an_account_without_limits_has_no_glance(self):
+        model = panel_model.build([{"agent": "OpenRouter", "api_id": "openrouter", "err": "", "compact": True,
+                                    "metrics": [_metric("Balance", None, None, "$4.00")]}], 1000.0, now=1000.0)
+
+        self.assertIsNone(model["providers"][0]["glance"])
+
+
 if __name__ == "__main__":
     unittest.main()

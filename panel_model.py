@@ -25,7 +25,7 @@ from pathlib import Path
 import fleet
 import api_credentials
 
-SCHEMA = 5
+SCHEMA = 6
 
 
 def _assets_dir():
@@ -514,6 +514,82 @@ def _caption(rows, rings, groups):
     return None
 
 
+ALERT_ORDER = {"full": 0, "high": 1, "runout": 2}
+
+
+def _glance(groups):
+    """What a closed account shows: the one limit that stops it first, and only
+    what needs attention besides it.
+
+    A used-up all-model window (5-hour, weekly) means the account waits for it.
+    Model families (Antigravity's Gemini, Claude & GPT) are separate pools: the
+    account waits only once every family is used up. A model-scoped limit
+    (Claude's "Fable weekly") never blocks the account; used up or nearly so it
+    is an alert, and so is any limit on course to run out before it resets.
+    Reset tokens and API credits are not limits; the resets card and the open
+    section show them. None for an account without limits.
+    """
+    timed = [(group, row) for group in groups for row in group["rows"]
+             if row.get("pct") is not None and row["label"] not in (RESETS, CREDITS)
+             and not str(row.get("value", "")).startswith("$")]
+    if not timed:
+        return None
+
+    def name(group, row):
+        label = _short(row["label"])
+        return f"{group['title']} {label[:1].lower()}{label[1:]}" if group.get("title") else label
+
+    def until(pair):
+        reset = pair[1].get("reset_at")
+        return reset if isinstance(reset, (int, float)) else float("inf")
+
+    def blocker(unit):
+        """A used-up pool waits for the last of its used-up windows."""
+        full = [pair for pair in unit if pair[1]["state"] == "full"]
+        return max(full, key=until) if full else None
+
+    def alert(kind, pair, at=None):
+        return {"kind": kind, "label": name(*pair), "at": at if at is not None else pair[1].get("reset_at")}
+
+    general = [(g, r) for g, r in timed if not g.get("title") and r["label"] in PLAIN]
+    if general:
+        units = [general]
+    elif any(g.get("title") for g, _ in timed):
+        units = [unit for unit in ([(g, r) for g, r in timed if g is group] for group in groups if group.get("title")) if unit]
+    else:
+        units = [timed]
+    pooled = {id(r) for unit in units for _, r in unit}
+    blockers = [blocker(unit) for unit in units]
+    alerts = []
+    blocked = all(blockers)
+    open_rows = [pair for unit, block in zip(units, blockers) if not block for pair in unit]
+    if blocked:
+        binding = min(blockers, key=until)
+    else:
+        binding = max(open_rows, key=lambda p: (p[1]["pct"], p[1].get("window") or 0, -until(p)))
+    # A run-out says more than "almost used up": it says when.
+    running = [pair for pair in timed if pair[1].get("runout_at") and pair[1]["state"] != "full"]
+    soonest = None if blocked or not running else min(running, key=lambda p: p[1]["runout_at"])
+    quiet = soonest[1] if soonest else None
+    if soonest:
+        alerts.append(alert("runout", soonest, soonest[1]["runout_at"]))
+    if not blocked:
+        alerts += [alert("full", block) for block in blockers if block]
+        alerts += [alert("high", pair) for pair in open_rows
+                   if pair[1] is not binding[1] and pair[1] is not quiet and pair[1]["state"] == "high"]
+    for pair in timed:
+        if id(pair[1]) in pooled:
+            continue
+        if pair[1]["state"] == "full":
+            # Back no later than the account itself: nothing more to say.
+            if not blocked or until(pair) > until(binding) + 60:
+                alerts.append(alert("full", pair))
+        elif pair[1]["state"] == "high" and not blocked and pair[1] is not quiet:
+            alerts.append(alert("high", pair))
+    alerts.sort(key=lambda a: (ALERT_ORDER[a["kind"]], a["at"] if a["at"] is not None else float("inf")))
+    return {"row": dict(binding[1], short=name(*binding)), "blocked": blocked, "alerts": alerts[:2]}
+
+
 def _balance(rows):
     money = [r for r in rows if r.get("pct") is None and r["label"] != RESETS
              and r.get("value") not in (None, "", "—")]
@@ -674,6 +750,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                 "caption": _caption(rows, rings, groups),
                 "balance": balance,
                 "meters": _meters(groups),
+                "glance": _glance(groups),
                 "note": next((str(m["note"]) for m in all_shown if m.get("note")), ""),
                 "spend": _spend(pid, shown, usage) if cost_on else None,
                 "account": {"mode": agent["account"]["mode"]}
