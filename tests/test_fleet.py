@@ -1413,7 +1413,7 @@ class UsageResetTests(unittest.TestCase):
         with mock.patch.object(fleet, "_jget", return_value=(200, {}, detail)) as get:
             metric = fleet._codex_resets_metric({"available_count": 1, "applicable_available_count": 0}, "tok", {})
             again = fleet._codex_resets_metric({"available_count": 1}, "tok", {})
-        self.assertEqual(metric, fleet.M("Resets", None, None, f"1 available · until {fleet._day(end)}"))
+        self.assertEqual(metric, fleet.M("Resets", None, end, f"1 available · until {fleet._day(end)}"))
         self.assertEqual(again, metric)
         self.assertEqual(get.call_count, 1)  # the detail is cached between polls
 

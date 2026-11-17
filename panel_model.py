@@ -10,6 +10,9 @@ Schema 3 adds what the tokens in local agent logs would cost at API list prices
 (ledger.py's snapshot, passed in as `usage`) and how fast each limit has been
 filling lately (`rates`, from Fleet's own readings). Both are optional: without
 them the model is schema 2's plus the closed-section meters.
+
+Schema 5 adds `resets`, every upcoming reset and expiry across accounts, soonest
+first, and a provider `note` for figures that need a sentence of explanation.
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ from pathlib import Path
 import fleet
 import api_credentials
 
-SCHEMA = 4
+SCHEMA = 5
 
 
 def _assets_dir():
@@ -128,14 +131,21 @@ def _row(metric, label=None, window=None, scoped=False):
     else:
         value = extra or "—"
     named, seconds = _window(metric.get("label"), scoped and pct is not None)
-    return {
+    span = metric.get("window_seconds")
+    row = {
         "label": label or named,
         "pct": pct,
         "value": value,
         "reset_at": fleet._epoch(metric.get("resets")),
-        "window": window or seconds,
+        "window": window or (span if isinstance(span, (int, float)) and span > 0 else None) or seconds,
         "severity": severity(pct),
     }
+    # A dollar meter (API credits) also carries its amounts, so the flyout can
+    # print dollars used or left beside the bar instead of a percentage.
+    amount, total = metric.get("amount"), metric.get("amount_total")
+    if pct is not None and isinstance(amount, (int, float)) and isinstance(total, (int, float)) and total > 0:
+        row.update(amount=float(amount), amount_total=float(total))
+    return row
 
 
 def _icon(raw_name):
@@ -248,6 +258,7 @@ def _rings(name, groups):
 LEDGER = {"claude": "claude", "codex": "codex"}
 PLAIN = ("5-hour limit", "Weekly limit", "Daily limit", "Monthly limit")
 RESETS = "Resets"
+CREDITS = fleet.API_CREDITS
 
 
 def _meter_label(label):
@@ -281,9 +292,58 @@ def _meters(groups):
         fullest = max(rest, key=lambda r: r["pct"])
         if fullest["pct"] > max(r["pct"] for r in chosen):
             chosen.append(fullest)
-    # A waiting usage-limit reset is worth seeing without opening the section.
+    # A waiting usage-limit reset is worth seeing without opening the section,
+    # and so are a subscription's API credits.
     chosen += [r for g in groups for r in g["rows"] if r["label"] == RESETS and r.get("pct") is None]
+    chosen += [r for g in groups for r in g["rows"] if r["label"] == CREDITS]
     return [dict(r, short=_meter_label(r["label"])) for r in chosen]
+
+
+def _expiring(value):
+    """'2 free resets expire', from a Resets row's '2 available · until Dec 2'."""
+    match = re.match(r"(\d+) available", str(value or ""))
+    count = int(match.group(1)) if match else 0
+    if count == 1:
+        return "1 free reset expires"
+    return f"{count} free resets expire" if count else "Free resets expire"
+
+
+def _upcoming(providers, now):
+    """Every reset and expiry across accounts, soonest first: the flyout's
+    "Next resets" list. Limits on one account that reset in the same minute
+    share a line ("Weekly, Fable wk"), kept apart from any that are used up,
+    so a "full" line names only the limits that block."""
+    out = []
+    for provider in providers:
+        lines = {}
+        for group in provider["all_groups"]:
+            for row in group["rows"]:
+                at = row.get("reset_at")
+                if not isinstance(at, (int, float)) or at <= now:
+                    continue
+                if row["label"] == RESETS:
+                    kind, label = "expiry", _expiring(row.get("value"))
+                elif row["label"] == CREDITS:
+                    kind, label = "credits", "API credits renew"
+                elif row.get("pct") is not None:
+                    kind, label = "limit", _meter_label(row["label"])
+                    if group.get("title"):
+                        label = f"{group['title']} {label[:1].lower()}{label[1:]}"
+                else:
+                    continue
+                full = row.get("state") == "full"
+                key = (kind, round(at / 60), full)
+                if key in lines:
+                    if label not in lines[key]["labels"]:
+                        lines[key]["labels"].append(label)
+                    continue
+                lines[key] = {"id": provider["id"], "name": provider["name"], "icon": provider["icon"],
+                              "mark": provider["mark"], "kind": kind, "labels": [label], "at": at,
+                              "state": "full" if full else "calm",
+                              "value": row.get("value") if kind != "limit" else ""}
+        out.extend(lines.values())
+    out.sort(key=lambda line: (line["at"], line["name"]))
+    return out
 
 
 def _span_row(metrics):
@@ -565,6 +625,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                 "caption": _caption(rows, rings, groups),
                 "balance": balance,
                 "meters": _meters(groups),
+                "note": next((str(m["note"]) for m in all_shown if m.get("note")), ""),
                 "spend": _spend(pid, shown, usage) if cost_on else None,
                 "account": {"mode": agent["account"]["mode"]}
                 if pid in api_credentials.TARGETS and isinstance(agent.get("account"), dict)
@@ -583,6 +644,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
         "live": fresh,
         "cached": len(providers) - fresh,
         "providers": providers,
+        "resets": _upcoming(providers, now),
         "inactive": inactive,
         "known": known,
         # Local history remains useful when a client is signed out. Never put
@@ -595,7 +657,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
                      for key in ("files", "pending_files", "skipped_zst", "updated", "since")}
                     if cost_on and usage else None,
         "api_accounts": [{"id": item["id"], "source": item.get("source", ""), "enabled": item.get("enabled") is not False}
-                         for item in (accounts or []) if item.get("id") in api_credentials.TARGETS
+                         for item in (accounts or []) if item.get("id") in api_credentials.SLOTS
                          and item.get("source", "") in ("", "windows", "environment")],
         "summary": _summary(usage, settings),
         "settings": {key: settings[key] for key in ("units", "tray_icon", "alerts", "cost") if key in settings},

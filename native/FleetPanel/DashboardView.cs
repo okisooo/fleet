@@ -63,6 +63,15 @@ namespace FleetPanel
                 body.Children.Add(DashStack(charts));
             }
 
+            var upcoming = UpcomingResets();
+            if (upcoming.Count > 0)
+            {
+                body.Children.Add(DashTitle("Next resets"));
+                var list = new StackPanel { Margin = new Thickness(0, 0, 0, 16) };
+                foreach (var line in upcoming) list.Children.Add(ResetRow(line));
+                body.Children.Add(list);
+            }
+
             body.Children.Add(DashTitle("Providers and limits"));
             if (data.Providers.Count == 0 && data.Inactive.Count == 0)
                 body.Children.Add(DashNote("No providers connected yet. Sign in to a supported client or connect a Claude API key in Settings."));
@@ -141,15 +150,27 @@ namespace FleetPanel
             var rows = (p.AllGroups.Count > 0 ? p.AllGroups : p.Groups).SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r })).ToList();
             if (rows.Count > 0)
             {
-                var table = DashTable(new[] { "Limit", data.Units == "left" ? "Left" : "Used", "Resets" }, 2.2, 1, 1.4);
+                var table = DashTable(new[] { "Limit", data.Units == "left" ? "Left" : "Used", "Resets" }, 2, 0.8, 1.8);
                 foreach (var item in rows)
                 {
                     var row = item.Row;
                     var label = (item.Group != "" ? item.Group + " · " : "") + row.Label;
-                    var value = row.Pct != null ? Math.Round(Shown(row.Pct.Value)).ToString(CultureInfo.InvariantCulture) + "%" : row.Value;
-                    var index = DashRow(table, label, value, row.ResetAt == null ? "—" : Clock.Day(row.ResetAt));
+                    if (row.Pct == null)
+                    {
+                        // A fact rather than a limit ("2 available · until Dec 2", "$100 a
+                        // month"): it reads on one line across both columns.
+                        DashRow(table, label, row.Value);
+                        Grid.SetColumnSpan(table.Children.OfType<TextBlock>().Last(), 2);
+                        continue;
+                    }
+                    var index = DashRow(table, label, Figure(row), row.ResetAt == null ? "—" : Clock.Day(row.ResetAt));
                     var reset = table.Children.OfType<TextBlock>().Last();
-                    if (row.ResetAt != null) tickers.Add(() => reset.Text = Clock.Day(row.ResetAt));
+                    if (row.ResetAt != null)
+                    {
+                        // The exact time and a live countdown, as in "Next resets".
+                        tickers.Add(() => reset.Text = Clock.Day(row.ResetAt) + " · " + Clock.Left(row.ResetAt));
+                        reset.ToolTip = Clock.Full(ResetVerb(row), row.ResetAt);
+                    }
                     if (row.Pct != null)
                     {
                         var used = row.Pct.Value;

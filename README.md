@@ -68,6 +68,7 @@ keep `_internal` beside `Fleet.exe` when upgrading a portable copy.
 | **cost estimates** | what Claude Code and Codex tokens would cost at public API prices, from local logs: today, 7 and 30 days, plus burn rate. estimates only; subscriptions are not billed per token |
 | **API providers** | OpenRouter, DeepSeek, Kimi/Moonshot, MiniMax, Z.AI, and LiteLLM balances or usage; OpenAI organization cost with an admin key |
 | **Claude API** | free connection check for a regular key; this month's and today's (UTC) organization spend for an admin key. the included Max/Team credit balance is shown only in Claude Console, which **Open billing** links to |
+| **ChatGPT API credits** | the monthly OpenAI API credits included with ChatGPT Pro, on the Codex card: when they renew, and an estimate of what is left from the linked organization's spend with an admin key. OpenAI shows the exact balance only in Platform billing, which **Open billing** links to |
 | **opt-in probes** | rate-limit headers from OpenAI, Anthropic, and other supported APIs; real inference requests that may cost money |
 | **custom providers** | map an HTTPS JSON usage endpoint for a gateway, proxy, or self-hosted service |
 

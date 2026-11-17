@@ -21,7 +21,7 @@ Run:  uv run --with rich python fleet.py            # live API view, 30s refresh
 Endpoints/field shapes cribbed from openusage (MIT, robinebers/openusage).
 """
 from __future__ import annotations
-import argparse, base64, concurrent.futures, ctypes, email.utils, functools, glob, hashlib, json, logging, os, re, shutil, sqlite3, subprocess, sys, threading, time, urllib.request, urllib.error, urllib.parse
+import argparse, base64, calendar, concurrent.futures, ctypes, email.utils, functools, glob, hashlib, json, logging, math, os, re, shutil, sqlite3, subprocess, sys, threading, time, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -740,14 +740,17 @@ def _day(ts):
 
 
 def _resets_metric(count, expires=None, extra=()):
-    """One "Resets" row: how many usage-limit resets are waiting, and until when."""
+    """One "Resets" row: how many usage-limit resets are waiting, and until when.
+
+    The expiry also rides along as the row's time, so the flyout can list it
+    with the other resets, soonest first."""
     parts = []
     if count:
         parts.append(f"{count} available")
         if expires:
             parts.append(f"until {_day(expires)}")
     parts.extend(extra)
-    return M("Resets", None, None, " · ".join(parts)) if parts else None
+    return M("Resets", None, expires if count else None, " · ".join(parts)) if parts else None
 
 
 # Codex reports its reset count in every usage reply; the expiry needs a second
@@ -816,6 +819,176 @@ def _claude_resets_metric(j, now=None):
             if back and back > now:
                 extra.append(f"5-hour back {_day(back)}")
     return _resets_metric(count, min(ends) if ends else None, extra)
+
+
+# ---------- ChatGPT API credits ----------
+# Eligible ChatGPT plans include monthly OpenAI API credits for the API
+# organization the subscriber links. Each grant expires at the end of the ChatGPT
+# billing cycle and does not roll over; free credits are spent before purchased
+# ones (developers.openai.com/api/docs/guides/chatgpt-api-credits). OpenAI has
+# no endpoint for the balance, so Fleet adds up the linked organization's spend
+# since the cycle began (the documented Costs API, which needs an admin key) and
+# takes it from the grant.
+#
+# Monthly grant in USD by the plan_type ChatGPT reports. Only plans matched to
+# OpenAI's table are listed: "prolite" is the Pro $100 tier, $100 a month.
+API_CREDIT_GRANTS = {"prolite": 100}
+API_CREDITS = "API credits"
+OPENAI_ADMIN = apikeys.api_credentials.OPENAI_ADMIN
+# The billing date moves once a month: read it every six hours, and again as
+# soon as a cycle has ended. Spend is read at most every 15 minutes.
+_CHATGPT_CYCLE = {"account": None, "at": 0.0, "cycle": None}
+CHATGPT_CYCLE_SECS = 6 * 3600
+_API_CREDIT_SPEND = {"key": None, "at": 0.0, "spend": None, "err": ""}
+API_CREDIT_SPEND_SECS = 900
+
+
+def _month_before(ts):
+    """The same moment a calendar month earlier, on the month's last day if needed."""
+    d = datetime.fromtimestamp(ts, timezone.utc)
+    year, month = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
+    return d.replace(year=year, month=month, day=min(d.day, calendar.monthrange(year, month)[1])).timestamp()
+
+
+def _parse_chatgpt_cycle(payload, acct=None):
+    """{"start", "end"} of a paid monthly ChatGPT subscription, from the account check."""
+    accounts = payload.get("accounts") if isinstance(payload, dict) else None
+    if not isinstance(accounts, dict):
+        return None
+    entry = accounts.get(acct) if acct else None
+    if not isinstance(entry, dict):
+        paid = [a for a in accounts.values() if isinstance(a, dict)
+                and isinstance(a.get("entitlement"), dict) and a["entitlement"].get("has_active_subscription")]
+        entry = paid[0] if len(paid) == 1 else None
+    ent = entry.get("entitlement") if isinstance(entry, dict) else None
+    if not isinstance(ent, dict) or ent.get("has_active_subscription") is not True:
+        return None
+    # Free trials and complimentary plans get no credits; a yearly plan has no
+    # monthly cycle to read the grant's expiry from.
+    if ent.get("is_active_subscription_gratis") or ent.get("billing_period") != "monthly":
+        return None
+    end = _epoch(ent.get("renews_at") or ent.get("expires_at"))
+    if not end:
+        return None
+    return {"start": _month_before(end), "end": end}
+
+
+def _chatgpt_cycle(tok, hdr, acct=None, now=None):
+    """The current ChatGPT billing cycle, cached; None when it cannot be read."""
+    now = time.time() if now is None else now
+    cache = _CHATGPT_CYCLE
+    cycle = cache["cycle"]
+    if (cache["account"] == acct and now - cache["at"] < CHATGPT_CYCLE_SECS
+            and (cycle is None or cycle["end"] > now)):
+        return cycle
+    # The same account check the ChatGPT web app makes, with Codex's sign-in.
+    st, _hd, j = _jget("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", tok, hdr)
+    at = now
+    if st == 200:
+        cycle = _parse_chatgpt_cycle(j, acct)
+    else:
+        if cache["account"] != acct or (cycle is not None and cycle["end"] <= now):
+            cycle = None
+        # A failed read keeps what is known and is tried again in 15 minutes.
+        at = now - CHATGPT_CYCLE_SECS + API_CREDIT_SPEND_SECS
+    cache.update(account=acct, at=at, cycle=cycle)
+    return cycle
+
+
+def _openai_admin_key():
+    """An OpenAI admin key: OPENAI_ADMIN_KEY, else the one saved in Fleet's settings."""
+    return apikeys._first_env(["OPENAI_ADMIN_KEY"])[1] or apikeys.api_credentials.read(OPENAI_ADMIN)
+
+
+def _cost_error(status):
+    if status in (401, 403):
+        return "OpenAI rejected the admin key"
+    if status == 429:
+        return "OpenAI is rate limiting cost reports"
+    return f"cost report failed (http {status})" if status else "OpenAI is unreachable"
+
+
+def _openai_spend_since(key, start, now=None):
+    """(USD the organization has spent since `start`, error) from the Costs API.
+
+    Cached for 15 minutes per key and cycle; a failed read keeps the last total."""
+    now = time.time() if now is None else now
+    cache = _API_CREDIT_SPEND
+    ident = (hashlib.sha256(key.encode()).hexdigest(), int(start))
+    if cache["key"] == ident and now - cache["at"] < API_CREDIT_SPEND_SECS:
+        return cache["spend"], cache["err"]
+    query = {"start_time": str(int(start)), "bucket_width": "1d", "limit": "62"}
+    total, err, seen = 0.0, "", set()
+    for _ in range(8):
+        url = "https://api.openai.com/v1/organization/costs?" + urllib.parse.urlencode(query)
+        st, _hd, j = _jget(url, key, timeout=10)
+        if st != 200 or not isinstance(j, dict):
+            err = _cost_error(st)
+            break
+        try:
+            for bucket in j["data"]:
+                for result in bucket.get("results") or []:
+                    amount = result.get("amount") or {}
+                    if str(amount.get("currency") or "usd").casefold() != "usd":
+                        raise ValueError("not usd")
+                    value = float(amount.get("value") or 0)
+                    if not math.isfinite(value):
+                        raise ValueError("not a number")
+                    total += value
+        except (TypeError, ValueError, KeyError, AttributeError):
+            err = "unreadable cost report"
+            break
+        if not j.get("has_more"):
+            break
+        page = j.get("next_page")
+        if not isinstance(page, str) or not page or page in seen:
+            err = "unreadable cost report"
+            break
+        seen.add(page)
+        query["page"] = page
+    else:
+        err = "cost report incomplete"
+    spend = max(0.0, total) if not err else cache["spend"] if cache["key"] == ident else None
+    cache.update(key=ident, at=now, spend=spend, err=err)
+    return spend, err
+
+
+def _api_credits_metric(plan, cycle, spend=None, err="", keyed=False):
+    """The "API credits" row: what is left of this cycle's grant, and when it renews."""
+    grant = API_CREDIT_GRANTS.get(str(plan or "").casefold())
+    if not grant or not cycle:
+        return None
+    metric = M(API_CREDITS, None, cycle["end"], f"${grant:,.0f} a month")
+    metric["window_seconds"] = round(cycle["end"] - cycle["start"])
+    since = _day(cycle["start"])
+    if spend is not None:
+        used = min(spend, grant)
+        metric.update(pct=round(used / grant * 100, 1), extra=f"${grant - used:,.2f} of ${grant:,.0f} left",
+                      amount=round(used, 2), amount_total=grant)
+        metric["note"] = (f"Your linked API organization's spend since {since}, taken from the "
+                          f"${grant:,.0f} grant. A prorated first month or other credit grants "
+                          "can make OpenAI billing differ.")
+        if err:
+            metric["note"] += f" Last reading kept: {err}."
+    elif keyed:
+        metric["note"] = f"Fleet could not read the balance: {err or 'no cost report yet'}."
+    else:
+        metric["note"] = ("OpenAI shows the balance only in Platform billing. With an admin key for "
+                          "the API organization linked to ChatGPT, Fleet counts its spend this "
+                          "billing month and shows what is left.")
+    return metric
+
+
+def _codex_api_credits(plan, tok, hdr, acct=None):
+    """API credits for a ChatGPT plan that includes them; no extra requests otherwise."""
+    if str(plan or "").casefold() not in API_CREDIT_GRANTS:
+        return None
+    cycle = _chatgpt_cycle(tok, hdr, acct)
+    if not cycle:
+        return None
+    key = _openai_admin_key()
+    spend, err = _openai_spend_since(key, cycle["start"]) if key else (None, "")
+    return _api_credits_metric(plan, cycle, spend, err, keyed=bool(key))
 
 
 def api_codex():
@@ -894,6 +1067,13 @@ def api_codex():
         if metric:
             out["metrics"].append(metric)
     metric = _codex_resets_metric(j.get("rate_limit_reset_credits"), tok, hdr)
+    if metric:
+        out["metrics"].append(metric)
+    try:
+        metric = _codex_api_credits(out["plan"], tok, hdr, acct)
+    except Exception as exc:
+        dbg("api credits", type(exc).__name__)
+        metric = None
     if metric:
         out["metrics"].append(metric)
     _save_last("codex", out)

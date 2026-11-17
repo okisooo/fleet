@@ -63,6 +63,8 @@ namespace FleetPanel
         }
 
         private static bool KnownAccount(string id) => id == "anthropic" || id == "anthropic-admin"
-            || id == "anthropic-backup" || id == "anthropic-backup-admin";
+            || id == "anthropic-backup" || id == "anthropic-backup-admin"
+            // The OpenAI organization's admin key, for a ChatGPT plan's API credits.
+            || id == "openai-admin";
     }
 }

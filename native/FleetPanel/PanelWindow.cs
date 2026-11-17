@@ -188,7 +188,8 @@ namespace FleetPanel
             {
                 if (action == "claude-sign-in") SignIn();
                 else if (action == "grok-renew") RenewGrok();
-                else if (action == "anthropic-billing") OpenBilling();
+                else if (action == "anthropic-billing") OpenBilling("https://platform.claude.com/settings/billing", "Claude");
+                else if (action == "openai-billing") OpenBilling("https://platform.openai.com/settings/organization/billing/overview", "OpenAI");
                 else if (action == "api-settings") { view.ShowSettings(); UpdateLayout(); }
             };
             view.SettingChanged += SaveSetting;
@@ -497,15 +498,15 @@ namespace FleetPanel
             if (!open || closing) Toggle();
         }
 
-        private void OpenBilling()
+        private void OpenBilling(string url, string provider)
         {
             try
             {
-                Process.Start(new ProcessStartInfo("https://platform.claude.com/settings/billing") { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
             }
             catch (Exception)
             {
-                Note("could not open Claude billing");
+                Note("could not open " + provider + " billing");
             }
         }
 

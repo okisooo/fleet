@@ -78,7 +78,7 @@ namespace FleetPanel
         private string page = "usage";
         private string selected = "";
         private string units;
-        private string apiEditing = "", apiFeedback = "";
+        private string apiEditing = "", apiFeedback = "", apiFeedbackId = "";
         private PasswordBox apiInput;
         private double updated;
         private DateTime busyUntil = DateTime.MinValue;
@@ -281,7 +281,7 @@ namespace FleetPanel
         {
             apiInput?.Clear();
             apiInput = null;
-            apiEditing = apiFeedback = "";
+            apiEditing = apiFeedback = apiFeedbackId = "";
         }
 
         /// <summary>For offscreen previews: open one provider's section.</summary>
@@ -324,6 +324,11 @@ namespace FleetPanel
             if (band != null)
             {
                 content.Children.Add(band);
+            }
+            var resets = ResetsCard();
+            if (resets != null)
+            {
+                content.Children.Add(resets);
             }
             if (data.Providers.Count == 0 && data.Inactive.Count == 0)
             {
@@ -709,13 +714,23 @@ namespace FleetPanel
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(54) });
             grid.Children.Add(Text(ShortLabel(row), 12, theme.TextSecondary));
+            if (stale)
+            {
+                grid.Opacity = 0.55;
+            }
             if (row.Pct == null)
             {
                 var value = Text(row.Value, 12, theme.Text, FontWeights.SemiBold, tabular: true);
                 value.HorizontalAlignment = HorizontalAlignment.Right;
                 Grid.SetColumn(value, 1);
-                Grid.SetColumnSpan(value, 3);
+                // A dated row (free resets, API credits) keeps its countdown column.
+                Grid.SetColumnSpan(value, row.ResetAt != null ? 2 : 3);
                 grid.Children.Add(value);
+                if (row.ResetAt != null)
+                {
+                    value.Margin = new Thickness(0, 0, 4, 0);
+                    grid.Children.Add(Countdown(row));
+                }
                 return grid;
             }
             var pct = row.Pct.Value;
@@ -725,21 +740,48 @@ namespace FleetPanel
             };
             Grid.SetColumn(meter, 1);
             grid.Children.Add(meter);
-            var number = Text(Math.Round(Shown(pct)).ToString(CultureInfo.InvariantCulture) + "%", 12, theme.Text, FontWeights.SemiBold, tabular: true);
+            var number = Text(Figure(row), 12, theme.Text, FontWeights.SemiBold, tabular: true);
             number.HorizontalAlignment = HorizontalAlignment.Right;
+            if (row.AmountTotal != null)
+            {
+                number.ToolTip = row.Value;
+            }
             Grid.SetColumn(number, 2);
             grid.Children.Add(number);
+            grid.Children.Add(Countdown(row));
+            return grid;
+        }
+
+        /// <summary>A meter's figure: dollars for a dollar meter (API credits), used or
+        /// left like the bar beside it; otherwise the percentage.</summary>
+        private string Figure(Row row)
+        {
+            if (row.Amount != null && row.AmountTotal != null)
+            {
+                var amount = Units == "left" ? Math.Max(0, row.AmountTotal.Value - row.Amount.Value) : row.Amount.Value;
+                return Format.Money(amount, compact: true);
+            }
+            return Math.Round(Shown(row.Pct ?? 0)).ToString(CultureInfo.InvariantCulture) + "%";
+        }
+
+        /// <summary>The countdown column: it ticks every second, and hovering it gives
+        /// the exact local time.</summary>
+        private TextBlock Countdown(Row row)
+        {
             var reset = Text("", 12, theme.TextSecondary, tabular: true);
             reset.HorizontalAlignment = HorizontalAlignment.Right;
             Grid.SetColumn(reset, 3);
-            grid.Children.Add(reset);
-            tickers.Add(() => reset.Text = Clock.Left(row.ResetAt));
-            if (stale)
+            if (row.ResetAt != null)
             {
-                grid.Opacity = 0.55;
+                reset.ToolTip = Clock.Full(ResetVerb(row), row.ResetAt);
+                ToolTipService.SetInitialShowDelay(reset, 400);
             }
-            return grid;
+            tickers.Add(() => reset.Text = Clock.Left(row.ResetAt));
+            return reset;
         }
+
+        private static string ResetVerb(Row row) =>
+            row.Label == "Resets" ? "Unused resets expire" : row.Label == "API credits" ? "Renews" : "Resets";
 
         private static string ShortLabel(Row row)
         {
@@ -977,6 +1019,11 @@ namespace FleetPanel
             {
                 stack.Children.Add(limits);
             }
+            var credits = p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).FirstOrDefault(r => r.Label == "API credits");
+            if (credits != null || p.Note != "")
+            {
+                stack.Children.Add(Credits(p, credits));
+            }
             if (spend != null && spend.Estimated)
             {
                 var note = Text("Some models priced by their family's rate.", 11, theme.TextTertiary);
@@ -984,6 +1031,57 @@ namespace FleetPanel
                 stack.Children.Add(note);
             }
             return stack;
+        }
+
+        private const string OpenAiAdmin = "openai-admin";
+
+        /// <summary>
+        /// A ChatGPT plan's API credits: what is left and when they renew, how Fleet
+        /// counts them, and the way to the real balance in OpenAI billing.
+        /// </summary>
+        private FrameworkElement Credits(Provider p, Row credits)
+        {
+            var block = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+            if (credits != null)
+            {
+                var sheet = new Grid();
+                sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(KeyColumn) });
+                sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                Pair(sheet, "API credits", Value(credits.Value));
+                if (credits.ResetAt != null)
+                {
+                    var renews = Value(Clock.When(credits.ResetAt));
+                    var countdown = Run("", 12, theme.TextSecondary);
+                    renews.Inlines.Add(countdown);
+                    var at = credits.ResetAt;
+                    tickers.Add(() => countdown.Text = " · in " + Clock.Left(at));
+                    renews.ToolTip = Clock.Full("Renews", at) + ". Unused credits don't roll over.";
+                    Pair(sheet, "Renews", renews);
+                }
+                block.Children.Add(sheet);
+            }
+            if (p.Note != "")
+            {
+                var note = Text(p.Note, 12, theme.TextSecondary);
+                note.TextWrapping = TextWrapping.Wrap;
+                note.TextTrimming = TextTrimming.None;
+                note.Margin = new Thickness(0, 4, 0, 8);
+                block.Children.Add(note);
+            }
+            if (credits != null)
+            {
+                var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+                buttons.Children.Add(Button("Open billing", "See the API credit balance in OpenAI Platform billing",
+                    () => ActionClicked?.Invoke("openai-billing")));
+                if (!data.ApiAccounts.TryGetValue(OpenAiAdmin, out var source) || source == "")
+                {
+                    var add = Button("Add admin key", "Save an admin key for the linked OpenAI API organization", ShowSettings);
+                    add.Margin = new Thickness(6, 0, 0, 0);
+                    buttons.Children.Add(add);
+                }
+                block.Children.Add(buttons);
+            }
+            return block;
         }
 
         private static TextBlock Rich()
@@ -1032,17 +1130,19 @@ namespace FleetPanel
         /// </summary>
         private FrameworkElement Limits(Provider p)
         {
-            var rows = p.Groups.SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r })).ToList();
+            // API credits without a balance are only a sentence; the credits block says it.
+            var rows = p.Groups.SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r }))
+                .Where(x => !(x.Row.Label == "API credits" && x.Row.Pct == null)).ToList();
             if (rows.Count == 0)
             {
                 return null;
             }
             var table = new Grid { Margin = new Thickness(0, p.Spend != null && data.Cost ? 10 : 2, 0, 0) };
-            foreach (var width in new[] { 54.0, 34, 40, -1, 72 })
+            foreach (var width in new[] { 60.0, 34, 40, -1, 72 })
             {
                 table.ColumnDefinitions.Add(new ColumnDefinition { Width = width < 0 ? new GridLength(1, GridUnitType.Star) : new GridLength(width) });
             }
-            var head = new[] { "Limit", "Used", "Rate", "Pace", "Resets" };
+            var head = new[] { "Limit", Units == "left" ? "Left" : "Used", "Rate", "Pace", "Resets" };
             table.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             for (var c = 0; c < head.Length; c++)
             {
@@ -1057,9 +1157,12 @@ namespace FleetPanel
                 var row = item.Row;
                 var r = table.RowDefinitions.Count;
                 table.RowDefinitions.Add(new RowDefinition { Height = new GridLength(20) });
-                var label = (item.Group != "" ? item.Group + " " : "") + ShortLabel(row).ToLowerInvariant();
+                var name = ShortLabel(row);
+                var label = item.Group != "" ? item.Group + " " + LowerFirst(name) : name;
                 label = label.Length > 0 ? char.ToUpperInvariant(label[0]) + label.Substring(1) : "Usage";
-                Cell(table, r, 0, Text(label, 12, theme.TextSecondary), HorizontalAlignment.Left);
+                var labelCell = Text(label, 12, theme.TextSecondary);
+                labelCell.ToolTip = label;
+                Cell(table, r, 0, labelCell, HorizontalAlignment.Left);
                 if (row.Pct == null)
                 {
                     var value = Text(row.Value, 12, theme.Text, FontWeights.SemiBold, tabular: true);
@@ -1076,10 +1179,19 @@ namespace FleetPanel
                 Cell(table, r, 3, paceCell, HorizontalAlignment.Left);
                 var reset = Text("", 12, theme.TextSecondary, tabular: true);
                 tickers.Add(() => reset.Text = row.ResetAt == null ? "" : Clock.Day(row.ResetAt));
+                if (row.ResetAt != null)
+                {
+                    reset.ToolTip = Clock.Full(ResetVerb(row), row.ResetAt);
+                    ToolTipService.SetInitialShowDelay(reset, 400);
+                }
                 Cell(table, r, 4, reset, HorizontalAlignment.Right);
             }
             return table;
         }
+
+        /// <summary>"Weekly" to "weekly" after a group name; an acronym ("API credits") stays.</summary>
+        private static string LowerFirst(string text) =>
+            text.Length > 1 && char.IsUpper(text[1]) ? text : text.Length > 0 ? char.ToLowerInvariant(text[0]) + text.Substring(1) : text;
 
         private static void Cell(Grid table, int row, int column, FrameworkElement element, HorizontalAlignment align)
         {
@@ -1195,14 +1307,21 @@ namespace FleetPanel
                 () => ActionClicked?.Invoke("anthropic-billing"));
             billingLink.Margin = new Thickness(0, 6, 0, 0);
             stack.Children.Add(billingLink);
-            if (apiFeedback != "")
-            {
-                var feedback = Text(apiFeedback, 12, theme.TextSecondary);
-                feedback.TextWrapping = TextWrapping.Wrap;
-                feedback.TextTrimming = TextTrimming.None;
-                feedback.Margin = new Thickness(0, 4, 0, 4);
-                stack.Children.Add(feedback);
-            }
+            if (apiFeedbackId != OpenAiAdmin) AddApiFeedback(stack);
+
+            stack.Children.Add(SectionLabel("ChatGPT API credits", first: false));
+            var creditNote = Text("Pro includes monthly OpenAI API credits that expire on your ChatGPT billing date. "
+                + "An admin key for the API organization they go to lets Fleet show how much is left.", 12, theme.TextSecondary);
+            creditNote.TextWrapping = TextWrapping.Wrap;
+            creditNote.TextTrimming = TextTrimming.None;
+            creditNote.Margin = new Thickness(0, 0, 0, 6);
+            stack.Children.Add(creditNote);
+            stack.Children.Add(ApiKeyRow(OpenAiAdmin, "Admin key"));
+            var openAiBilling = Button("Open billing", "View the API credit balance in OpenAI Platform billing; no saved key required",
+                () => ActionClicked?.Invoke("openai-billing"));
+            openAiBilling.Margin = new Thickness(0, 6, 0, 0);
+            stack.Children.Add(openAiBilling);
+            if (apiFeedbackId == OpenAiAdmin) AddApiFeedback(stack);
 
             stack.Children.Add(SectionLabel("Tray icon", first: false));
             stack.Children.Add(Segmented(new[] { ("bars", "Bars"), ("ring", "Ring"), ("number", "Number") }, data.TrayIcon, value =>
@@ -1243,6 +1362,20 @@ namespace FleetPanel
             return stack;
         }
 
+        /// <summary>The last key action's result, under the section it belongs to.</summary>
+        private void AddApiFeedback(StackPanel stack)
+        {
+            if (apiFeedback == "")
+            {
+                return;
+            }
+            var feedback = Text(apiFeedback, 12, theme.TextSecondary);
+            feedback.TextWrapping = TextWrapping.Wrap;
+            feedback.TextTrimming = TextTrimming.None;
+            feedback.Margin = new Thickness(0, 4, 0, 4);
+            stack.Children.Add(feedback);
+        }
+
         private UIElement ApiKeyRow(string id, string title)
         {
             data.ApiAccounts.TryGetValue(id, out var source);
@@ -1268,6 +1401,7 @@ namespace FleetPanel
                         var error = CredentialChanged?.Invoke(id, null) ?? "Key storage is unavailable.";
                         if (error == "") data.ApiAccounts[id] = "";
                         apiFeedback = error == "" ? "Saved key removed." : error;
+                        apiFeedbackId = id;
                         apiEditing = "";
                         Rebuild();
                     });
@@ -1302,6 +1436,7 @@ namespace FleetPanel
                     apiEditing = "";
                 }
                 apiFeedback = error == "" ? "Key saved. Checking connection…" : error;
+                apiFeedbackId = id;
                 Rebuild();
             };
             buttons.Children.Add(Button("Save key", "Save securely and refresh usage", save));
