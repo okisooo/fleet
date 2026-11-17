@@ -199,6 +199,7 @@ namespace FleetPanel
             RunoutAt = Num(r, "runout_at"), State = Str(r, "state"), Rate = Num(r, "rate"),
             Amount = Num(r, "amount"), AmountTotal = Num(r, "amount_total"),
             Count = (int)(Num(r, "count") ?? 0), Usable = (int)(Num(r, "usable") ?? 0), Tokens = Expiries(r),
+            Since = Num(r, "since"), Today = Num(r, "today"),
         };
 
         /// <summary>A reset-token list: [{"expires", "count"}], soonest first.</summary>
@@ -398,6 +399,8 @@ namespace FleetPanel
         public double? Rate;
         /// <summary>A dollar meter's amounts (API credits): spent, and the whole grant.</summary>
         public double? Amount, AmountTotal;
+        /// <summary>API credits: when the counted spend began, and today's (UTC) share of it.</summary>
+        public double? Since, Today;
         /// <summary>Reset tokens: how many wait, how many could be redeemed now, and their expiries.</summary>
         public int Count, Usable;
         public List<TokenExpiry> Tokens = new List<TokenExpiry>();
@@ -562,6 +565,10 @@ namespace FleetPanel
             if (days < 7) return at.ToString("ddd ", CultureInfo.CurrentCulture) + At(epoch);
             return at.ToString("MMM d ", CultureInfo.CurrentCulture) + At(epoch);
         }
+
+        /// <summary>"Nov 5": the local date alone.</summary>
+        public static string Date(double? epoch) =>
+            epoch == null ? "" : Local(epoch.Value).ToString("MMM d", CultureInfo.CurrentCulture);
 
         /// <summary>"Resets Thu, Nov 20 at 8:00 AM": a full sentence for a tooltip.</summary>
         public static string Full(string verb, double? epoch)

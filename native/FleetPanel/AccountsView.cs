@@ -189,8 +189,8 @@ namespace FleetPanel
                 lines.Add(("", theme.Accent, "Reset token usable now · " + RedeemShort(p.Name),
                     "The provider would accept one of your reset tokens now. Redeem it in " + RedeemIn(p.Name) + "; Fleet only reads them."));
             }
-            var binding = p.Glance.Row.Short;
-            foreach (var alert in p.Glance.Alerts)
+            var binding = p.Glance?.Row.Short ?? "";
+            foreach (var alert in p.Glance?.Alerts ?? new List<GlanceAlert>())
             {
                 switch (alert.Kind)
                 {
@@ -297,9 +297,123 @@ namespace FleetPanel
             return hit;
         }
 
+        private const string CreditsLabel = "API credits";
+
+        /// <summary>An included API allowance (OpenAI API), if the account has one.</summary>
+        private static Row CreditsRow(Provider p) =>
+            p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).FirstOrDefault(r => r.Label == CreditsLabel);
+
+        /// <summary>
+        /// An included API allowance, read like an account: how much is left on a
+        /// meter, the exact local time it renews and a countdown. Without the admin
+        /// key that reads the spend, the line says what turns tracking on.
+        /// </summary>
+        private FrameworkElement CreditsSummary(Provider p, Row row)
+        {
+            var grid = new Grid { Background = Brushes.Transparent };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Indent) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(TimeColumn) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(20) });
+
+            var icon = Icon(p.Icon, p.Mark, 16);
+            icon.HorizontalAlignment = HorizontalAlignment.Left;
+            grid.Children.Add(icon);
+            var name = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            name.Inlines.Add(Run(p.Name, 14, theme.Text, FontWeights.SemiBold));
+            name.Inlines.Add(Run("  Credits", 12, theme.TextSecondary));
+            Grid.SetColumn(name, 1);
+            grid.Children.Add(name);
+
+            var when = Text(Clock.When(row.ResetAt), 12, theme.Text, tabular: true);
+            when.HorizontalAlignment = HorizontalAlignment.Right;
+            Grid.SetColumn(when, 2);
+            grid.Children.Add(when);
+
+            var tracked = row.Pct != null && row.Amount != null && row.AmountTotal != null;
+            FrameworkElement line;
+            if (tracked)
+            {
+                var bar = new Grid { VerticalAlignment = VerticalAlignment.Center };
+                bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
+                bar.Children.Add(new Meter(theme, Shown(row.Pct.Value), theme.ForState(row.State), Units == "left" ? null : row.Elapsed)
+                {
+                    Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center,
+                });
+                var figure = new TextBlock { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+                Typography.SetNumeralAlignment(figure, FontNumeralAlignment.Tabular);
+                figure.Inlines.Add(Run(Figure(row), 12, theme.Text, FontWeights.SemiBold));
+                figure.Inlines.Add(Run(" " + Units, 12, theme.TextSecondary));
+                Grid.SetColumn(figure, 1);
+                bar.Children.Add(figure);
+                if (p.FreshStale) bar.Opacity = 0.55;
+                line = bar;
+            }
+            else
+            {
+                // OpenAI reports spend only to an admin key: say so where the number would be.
+                var text = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+                text.Inlines.Add(Run(row.Value, 12, theme.TextSecondary));
+                text.Inlines.Add(Run(" · ", 12, theme.TextTertiary));
+                text.Inlines.Add(Run("add an admin key", 12, theme.Accent, FontWeights.SemiBold));
+                line = text;
+            }
+            Grid.SetRow(line, 1);
+            Grid.SetColumn(line, 1);
+            grid.Children.Add(line);
+
+            var left = Text("", 12, theme.TextSecondary, tabular: true);
+            left.HorizontalAlignment = HorizontalAlignment.Right;
+            Grid.SetRow(left, 1);
+            Grid.SetColumn(left, 2);
+            grid.Children.Add(left);
+            var at = row.ResetAt;
+            tickers.Add(() => left.Text = Clock.Left(at));
+
+            var tip = new List<string>();
+            if (tracked)
+            {
+                tip.Add(Format.Money(row.Amount.Value) + " of " + Format.Money(row.AmountTotal.Value) + " used"
+                    + (row.Since != null ? " since " + Clock.Date(row.Since) : "")
+                    + (row.Today != null ? ", " + Format.Money(row.Today.Value) + " of it today (UTC)" : "") + ".");
+            }
+            if (at != null) tip.Add(Clock.Full("Renews", at) + ". Unused credits don't roll over.");
+            if (!tracked) tip.Add("OpenAI reports API spend only to an admin key. Click for details.");
+            grid.ToolTip = string.Join("\n", tip);
+            ToolTipService.SetInitialShowDelay(grid, 400);
+
+            var lines = AlertLines(p).ToList();
+            if (tracked && row.RunoutAt != null && row.State != "full")
+            {
+                var runout = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+                runout.Inlines.Add(Glyph("\uE7BA", theme.CautionText));
+                runout.Inlines.Add(Run(" Runs out around " + Clock.Day(row.RunoutAt) + " at this pace", 12, theme.TextSecondary));
+                lines.Insert(0, runout);
+            }
+            foreach (var alert in lines.Take(2))
+            {
+                var r = grid.RowDefinitions.Count;
+                grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(19) });
+                Grid.SetRow(alert, r);
+                Grid.SetColumn(alert, 1);
+                Grid.SetColumnSpan(alert, 2);
+                grid.Children.Add(alert);
+            }
+            AutomationName(grid, p.Name + " credits, " + (tracked ? Figure(row) + " " + Units : row.Value)
+                + (at != null ? ", renews " + Clock.When(at) : ""));
+            return grid;
+        }
+
         /// <summary>A balance or spend account on one line: its mark, name and figure.</summary>
         private FrameworkElement MoneySummary(Provider p)
         {
+            var credits = CreditsRow(p);
+            if (credits != null)
+            {
+                return CreditsSummary(p, credits);
+            }
             var grid = new Grid { MinHeight = 24, Background = Brushes.Transparent };
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Indent) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

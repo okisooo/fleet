@@ -543,7 +543,8 @@ namespace FleetPanel
             public Provider Provider;
         }
 
-        private bool Expandable(Provider p) => p.AccountMode != "" || p.Groups.Any(g => g.Rows.Count > 0) && p.Kind != "balance";
+        private bool Expandable(Provider p) =>
+            p.AccountMode != "" || CreditsRow(p) != null || p.Groups.Any(g => g.Rows.Count > 0) && p.Kind != "balance";
 
         private FrameworkElement Section(Provider p, FrameworkElement summary)
         {
@@ -783,7 +784,10 @@ namespace FleetPanel
                     Pair(sheet, "Projects, 7 d", projects);
                 }
             }
-            stack.Children.Add(sheet);
+            if (sheet.Children.Count > 0)
+            {
+                stack.Children.Add(sheet);
+            }
             if (spend != null && spend.Estimated)
             {
                 var note = Text("Some models priced by their family's rate.", 11, theme.TextTertiary);
@@ -844,6 +848,18 @@ namespace FleetPanel
                 sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(KeyColumn) });
                 sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 Pair(sheet, "API credits", Value(credits.Value));
+                if (credits.Amount != null && credits.AmountTotal != null)
+                {
+                    var used = Value(Format.Money(credits.Amount.Value) + " of " + Format.Money(credits.AmountTotal.Value));
+                    if (credits.Since != null) used.Inlines.Add(Run(" since " + Clock.Date(credits.Since), 12, theme.TextSecondary));
+                    Pair(sheet, "Used", used);
+                    if (credits.Today != null)
+                    {
+                        var today = Value(Format.Money(credits.Today.Value));
+                        today.ToolTip = "Today's bucket of OpenAI's cost report so far. Reports can lag behind requests.";
+                        Pair(sheet, "Today (UTC)", today);
+                    }
+                }
                 if (credits.ResetAt != null)
                 {
                     var renews = Value(Clock.When(credits.ResetAt));
@@ -929,7 +945,7 @@ namespace FleetPanel
             // API credits without a balance are only a sentence, and reset tokens get
             // their own block: those blocks say it.
             var rows = p.Groups.SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r }))
-                .Where(x => !(x.Row.Label == "API credits" && x.Row.Pct == null) && !(x.Row.Label == TokenLabel && x.Row.Count > 0))
+                .Where(x => x.Row.Label != CreditsLabel && !(x.Row.Label == TokenLabel && x.Row.Count > 0))
                 .ToList();
             if (rows.Count == 0)
             {

@@ -881,7 +881,7 @@ OPENAI_ADMIN = apikeys.api_credentials.OPENAI_ADMIN
 # soon as a cycle has ended. Spend is read at most every 15 minutes.
 _CHATGPT_CYCLE = {"account": None, "at": 0.0, "cycle": None}
 CHATGPT_CYCLE_SECS = 6 * 3600
-_API_CREDIT_SPEND = {"key": None, "at": 0.0, "spend": None, "err": ""}
+_API_CREDIT_SPEND = {"key": None, "at": 0.0, "spend": None, "today": None, "err": ""}
 API_CREDIT_SPEND_SECS = 900
 
 
@@ -951,16 +951,17 @@ def _cost_error(status):
 
 
 def _openai_spend_since(key, start, now=None):
-    """(USD the organization has spent since `start`, error) from the Costs API.
+    """(USD the organization has spent since `start`, USD of today's UTC bucket or
+    None, error) from the Costs API.
 
-    Cached for 15 minutes per key and cycle; a failed read keeps the last total."""
+    Cached for 15 minutes per key and cycle; a failed read keeps the last totals."""
     now = time.time() if now is None else now
     cache = _API_CREDIT_SPEND
     ident = (hashlib.sha256(key.encode()).hexdigest(), int(start))
     if cache["key"] == ident and now - cache["at"] < API_CREDIT_SPEND_SECS:
-        return cache["spend"], cache["err"]
+        return cache["spend"], cache["today"], cache["err"]
     query = {"start_time": str(int(start)), "bucket_width": "1d", "limit": "62"}
-    total, err, seen = 0.0, "", set()
+    total, today, err, seen = 0.0, None, "", set()
     for _ in range(8):
         url = "https://api.openai.com/v1/organization/costs?" + urllib.parse.urlencode(query)
         st, _hd, j = _jget(url, key, timeout=10)
@@ -969,6 +970,7 @@ def _openai_spend_since(key, start, now=None):
             break
         try:
             for bucket in j["data"]:
+                day = 0.0
                 for result in bucket.get("results") or []:
                     amount = result.get("amount") or {}
                     if str(amount.get("currency") or "usd").casefold() != "usd":
@@ -976,7 +978,11 @@ def _openai_spend_since(key, start, now=None):
                     value = float(amount.get("value") or 0)
                     if not math.isfinite(value):
                         raise ValueError("not a number")
-                    total += value
+                    day += value
+                total += day
+                begins, ends = bucket.get("start_time"), bucket.get("end_time")
+                if isinstance(begins, (int, float)) and isinstance(ends, (int, float)) and begins <= now < ends:
+                    today = (today or 0.0) + day
         except (TypeError, ValueError, KeyError, AttributeError):
             err = "unreadable cost report"
             break
@@ -990,13 +996,18 @@ def _openai_spend_since(key, start, now=None):
         query["page"] = page
     else:
         err = "cost report incomplete"
-    spend = max(0.0, total) if not err else cache["spend"] if cache["key"] == ident else None
-    cache.update(key=ident, at=now, spend=spend, err=err)
-    return spend, err
+    if err:
+        kept = cache["key"] == ident
+        spend, today = (cache["spend"], cache["today"]) if kept else (None, None)
+    else:
+        spend, today = max(0.0, total), None if today is None else max(0.0, today)
+    cache.update(key=ident, at=now, spend=spend, today=today, err=err)
+    return spend, today, err
 
 
-def _api_credits_metric(plan, cycle, spend=None, err="", keyed=False):
-    """The "API credits" row: what is left of this cycle's grant, and when it renews."""
+def _api_credits_metric(plan, cycle, spend=None, err="", keyed=False, today=None):
+    """The "API credits" row: what is left of this cycle's grant, and when it renews.
+    `today`: what today's UTC bucket of the cost report holds so far."""
     grant = API_CREDIT_GRANTS.get(str(plan or "").casefold())
     if not grant or not cycle:
         return None
@@ -1006,7 +1017,9 @@ def _api_credits_metric(plan, cycle, spend=None, err="", keyed=False):
     if spend is not None:
         used = min(spend, grant)
         metric.update(pct=round(used / grant * 100, 1), extra=f"${grant - used:,.2f} of ${grant:,.0f} left",
-                      amount=round(used, 2), amount_total=grant)
+                      amount=round(used, 2), amount_total=grant, since=cycle["start"])
+        if today is not None:
+            metric["today"] = round(today, 2)
         metric["note"] = (f"Your linked API organization's spend since {since}, taken from the "
                           f"${grant:,.0f} grant. A prorated first month or other credit grants "
                           "can make OpenAI billing differ.")
@@ -1029,8 +1042,8 @@ def _codex_api_credits(plan, tok, hdr, acct=None):
     if not cycle:
         return None
     key = _openai_admin_key()
-    spend, err = _openai_spend_since(key, cycle["start"]) if key else (None, "")
-    return _api_credits_metric(plan, cycle, spend, err, keyed=bool(key))
+    spend, today, err = _openai_spend_since(key, cycle["start"]) if key else (None, None, "")
+    return _api_credits_metric(plan, cycle, spend, err, keyed=bool(key), today=today)
 
 
 def api_codex():

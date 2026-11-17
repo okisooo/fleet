@@ -38,6 +38,7 @@ ICONS = {
     "claude api": "claude.png",
     "claude api backup": "claude.png",
     "codex": "codex.png",
+    "openai api": "codex.png",
     "grok": "grok.ico",
     "antigrav": "antigravity.png",
     "antigravity": "antigravity.png",
@@ -148,6 +149,10 @@ def _row(metric, label=None, window=None, scoped=False):
     amount, total = metric.get("amount"), metric.get("amount_total")
     if pct is not None and isinstance(amount, (int, float)) and isinstance(total, (int, float)) and total > 0:
         row.update(amount=float(amount), amount_total=float(total))
+        # When the counted spend began, and what today's UTC report holds so far.
+        for key in ("since", "today"):
+            if isinstance(metric.get(key), (int, float)):
+                row[key] = float(metric[key])
     # Reset tokens: how many, how many could be redeemed now, and when each expires.
     count = metric.get("count")
     if row["label"] == fleet.RESET_TOKENS and isinstance(count, int) and count > 0:
@@ -271,6 +276,31 @@ LEDGER = {"claude": "claude", "codex": "codex"}
 PLAIN = ("5-hour limit", "Weekly limit", "Daily limit", "Monthly limit")
 RESETS = fleet.RESET_TOKENS
 CREDITS = fleet.API_CREDITS
+OPENAI_API = "OpenAI API"
+
+
+def _split_api_credits(data):
+    """A ChatGPT plan's API credits belong to the OpenAI API organization linked to
+    it, not to Codex's limits, so they get a row of their own beside the other API
+    accounts. Codex's sign-in still reads them (fleet._codex_api_credits), and
+    they share its reading's age."""
+    out = []
+    for agent in data or []:
+        metrics = agent.get("metrics") or []
+        credits = [metric for metric in metrics if metric.get("label") == CREDITS]
+        if not credits:
+            out.append(agent)
+            continue
+        if _stale_reason(agent.get("err")) == "Sign-in expired":
+            # Codex's own row offers the fix; credits read with that sign-in wait for it.
+            credits = []
+        out.append(dict(agent, metrics=[metric for metric in metrics if metric.get("label") != CREDITS]))
+        if credits:
+            out.append(dict(
+                {"agent": OPENAI_API, "api_id": "openai-api", "plan": "", "metrics": credits,
+                 "err": agent.get("err") or "", "known": agent.get("known", True)},
+                **{key: agent[key] for key in ("cached_at", "source") if key in agent}))
+    return out
 
 
 def _meter_label(label):
@@ -373,7 +403,7 @@ def _upcoming(providers, now):
                     # A reading saved before tokens were listed one by one.
                     kind, label = "expiry", "Reset tokens expire"
                 elif row["label"] == CREDITS:
-                    kind, label = "credits", "API credits renew"
+                    kind, label = "credits", "Credits renew"
                 elif row.get("pct") is not None:
                     kind, label = "limit", _meter_label(row["label"])
                     if group.get("title"):
@@ -691,6 +721,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
     now = time.time() if now is None else now
     settings = settings or {}
     rates = rates or {}
+    data = _split_api_credits(data)
     cost_on = settings.get("cost") is not False
     hidden = {str(item).casefold() for item in settings.get("hidden") or []}
     providers, inactive, known = [], [], []
