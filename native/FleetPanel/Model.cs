@@ -19,6 +19,8 @@ namespace FleetPanel
         public List<Provider> Providers = new List<Provider>();
         /// <summary>Every upcoming reset and expiry across accounts, soonest first.</summary>
         public List<ResetLine> Resets = new List<ResetLine>();
+        /// <summary>Each account's waiting reset tokens, the soonest to expire first.</summary>
+        public List<TokenSummary> Tokens = new List<TokenSummary>();
         public List<Inactive> Inactive = new List<Inactive>();
         public List<Known> Known = new List<Known>();
         public Dictionary<string, string> ApiAccounts = new Dictionary<string, string>();
@@ -139,6 +141,16 @@ namespace FleetPanel
                 }
                 if (line.At > 0) data.Resets.Add(line);
             }
+            foreach (var item in List(root, "tokens"))
+            {
+                var waiting = new TokenSummary
+                {
+                    Id = Str(item, "id"), Name = Str(item, "name"), Icon = Str(item, "icon"), Mark = Str(item, "mark"),
+                    Count = (int)(Num(item, "count") ?? 0), Usable = (int)(Num(item, "usable") ?? 0), Next = Num(item, "next"),
+                    Tokens = Expiries(item),
+                };
+                if (waiting.Count > 0) data.Tokens.Add(waiting);
+            }
             foreach (var item in List(root, "inactive"))
             {
                 data.Inactive.Add(new Inactive
@@ -185,7 +197,21 @@ namespace FleetPanel
             Window = Num(r, "window"), Elapsed = Num(r, "elapsed"), Reserve = Num(r, "reserve"),
             RunoutAt = Num(r, "runout_at"), State = Str(r, "state"), Rate = Num(r, "rate"),
             Amount = Num(r, "amount"), AmountTotal = Num(r, "amount_total"),
+            Count = (int)(Num(r, "count") ?? 0), Usable = (int)(Num(r, "usable") ?? 0), Tokens = Expiries(r),
         };
+
+        /// <summary>A reset-token list: [{"expires", "count"}], soonest first.</summary>
+        private static List<TokenExpiry> Expiries(Dictionary<string, object> map)
+        {
+            var expiries = new List<TokenExpiry>();
+            foreach (var t in List(map, "tokens"))
+            {
+                var at = Num(t, "expires");
+                if (at != null) expiries.Add(new TokenExpiry { Expires = at.Value, Count = Math.Max(1, (int)(Num(t, "count") ?? 1)) });
+            }
+            expiries.Sort((a, b) => a.Expires.CompareTo(b.Expires));
+            return expiries;
+        }
 
         private static Spend ParseSpend(Dictionary<string, object> map)
         {
@@ -362,10 +388,29 @@ namespace FleetPanel
         public double? Rate;
         /// <summary>A dollar meter's amounts (API credits): spent, and the whole grant.</summary>
         public double? Amount, AmountTotal;
+        /// <summary>Reset tokens: how many wait, how many could be redeemed now, and their expiries.</summary>
+        public int Count, Usable;
+        public List<TokenExpiry> Tokens = new List<TokenExpiry>();
     }
 
-    /// <summary>One line of the "Next resets" list: an account's limits that reset
-    /// together, or an expiry (free resets, API credits).</summary>
+    /// <summary>Reset tokens that expire together.</summary>
+    internal sealed class TokenExpiry
+    {
+        public double Expires;
+        public int Count;
+    }
+
+    /// <summary>One account's waiting reset tokens.</summary>
+    internal sealed class TokenSummary
+    {
+        public string Id = "", Name = "", Icon = "", Mark = "";
+        public int Count, Usable;
+        public double? Next;
+        public List<TokenExpiry> Tokens = new List<TokenExpiry>();
+    }
+
+    /// <summary>One line of the resets list: an account's limits that reset together,
+    /// or an expiry (reset tokens, API credits).</summary>
     internal sealed class ResetLine
     {
         public string Id = "", Name = "", Icon = "", Mark = "", Kind = "", State = "", Value = "";

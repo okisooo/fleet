@@ -739,23 +739,38 @@ def _day(ts):
     return f"{_MONTHS[d.month - 1].title()} {d.day}"
 
 
-def _resets_metric(count, expires=None, extra=()):
-    """One "Resets" row: how many usage-limit resets are waiting, and until when.
+RESET_TOKENS = "Reset tokens"
 
-    The expiry also rides along as the row's time, so the flyout can list it
-    with the other resets, soonest first."""
+
+def _resets_metric(count, tokens=(), extra=(), usable=0):
+    """One "Reset tokens" row: the usage-limit resets waiting to be redeemed.
+
+    tokens: [{"expires": epoch, "count": n}] for those with an end date. Each
+    goes on the flyout's list of resets; the soonest is also the row's time.
+    usable: how many the provider says could be applied right now."""
+    tokens = sorted((dict(t) for t in tokens if t.get("expires")), key=lambda t: t["expires"])
+    usable = min(_count(usable), count)
     parts = []
     if count:
-        parts.append(f"{count} available")
-        if expires:
-            parts.append(f"until {_day(expires)}")
+        if usable:
+            parts.append(f"{count} · usable now")
+        elif tokens:
+            several = len({_day(t["expires"]) for t in tokens}) > 1
+            parts.append(f"{count} · {'next expires' if several else 'expires'} {_day(tokens[0]['expires'])}")
+        else:
+            parts.append(f"{count} available")
     parts.extend(extra)
-    return M("Resets", None, expires if count else None, " · ".join(parts)) if parts else None
+    if not parts:
+        return None
+    metric = M(RESET_TOKENS, None, tokens[0]["expires"] if count and tokens else None, " · ".join(parts))
+    if count:
+        metric.update(count=count, usable=usable, tokens=tokens)
+    return metric
 
 
-# Codex reports its reset count in every usage reply; the expiry needs a second
-# request, so it is read only while resets exist and at most every 15 minutes.
-_CODEX_RESET_DETAIL = {"count": None, "at": 0.0, "expires": None}
+# Codex reports its reset count in every usage reply; the expiries need a second
+# request, so they are read only while resets exist and at most every 15 minutes.
+_CODEX_RESET_DETAIL = {"count": None, "at": 0.0, "tokens": []}
 CODEX_RESET_DETAIL_SECS = 900
 # A failed side request (the source of one row) keeps what was known and is
 # tried again after two minutes; tray.log notes each kind of failure once.
@@ -770,37 +785,50 @@ def _side_failed(what, status):
                       what, f"http {status}" if status else "no response", SIDE_RETRY_SECS)
 
 
-def _codex_reset_expiry(count, tok, hdr):
+def _codex_reset_tokens(count, tok, hdr):
+    """Codex's waiting reset tokens, soonest expiry first: [{"expires", "count": 1}].
+
+    Each is a "Full reset" of Codex's limits; those seen so far (Nov 2026) lasted
+    30 days from their grant."""
     cache = _CODEX_RESET_DETAIL
     if cache["count"] == count and time.time() - cache["at"] < CODEX_RESET_DETAIL_SECS:
-        return cache["expires"]
+        return cache["tokens"]
     st, _hd, j = _jget("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", tok, hdr)
     if st != 200 or not isinstance(j, dict):
-        _side_failed("Codex reset expiry", st)
-        expires = cache["expires"] if cache["count"] == count else None
-        cache.update(count=count, at=time.time() - CODEX_RESET_DETAIL_SECS + SIDE_RETRY_SECS, expires=expires)
-        return expires
-    dates = [_epoch(c.get("expires_at")) for c in (j.get("credits") or [])
-             if isinstance(c, dict) and c.get("status", "available") == "available"
-             and c.get("is_supported_by_plan", True) is not False]
-    dates = [d for d in dates if d and d > time.time()]
-    expires = min(dates) if dates else None
-    cache.update(count=count, at=time.time(), expires=expires)
-    return expires
+        _side_failed("Codex reset tokens", st)
+        tokens = cache["tokens"] if cache["count"] == count else []
+        cache.update(count=count, at=time.time() - CODEX_RESET_DETAIL_SECS + SIDE_RETRY_SECS, tokens=tokens)
+        return tokens
+    now = time.time()
+    tokens = []
+    for credit in j.get("credits") or []:
+        if (not isinstance(credit, dict) or credit.get("status", "available") != "available"
+                or credit.get("is_supported_by_plan", True) is False):
+            continue
+        end = _epoch(credit.get("expires_at"))
+        if end and end > now:
+            tokens.append({"expires": end, "count": 1})
+    tokens.sort(key=lambda t: t["expires"])
+    cache.update(count=count, at=now, tokens=tokens)
+    return tokens
 
 
 def _codex_resets_metric(summary, tok=None, hdr=None):
-    """Codex's free usage-limit resets ("You have 1 usage limit reset available")."""
-    count = _count((summary or {}).get("available_count")) if isinstance(summary, dict) else 0
+    """Codex's reset tokens ("You have 1 usage limit reset available").
+
+    applicable_available_count is how many could be redeemed right now; it is 0
+    while no limit is reached."""
+    summary = summary if isinstance(summary, dict) else {}
+    count = _count(summary.get("available_count"))
     if not count:
         return None
-    expires = None
+    tokens = []
     if tok:
         try:
-            expires = _codex_reset_expiry(count, tok, hdr or {})
+            tokens = _codex_reset_tokens(count, tok, hdr or {})
         except Exception:
-            expires = None
-    return _resets_metric(count, expires)
+            tokens = []
+    return _resets_metric(count, tokens, usable=summary.get("applicable_available_count"))
 
 
 def _claude_resets_metric(j, now=None):
@@ -810,7 +838,7 @@ def _claude_resets_metric(j, now=None):
     juniper_tide: the once-a-week 5-hour reset, when Anthropic offers it.
     """
     now = time.time() if now is None else now
-    count, ends = 0, []
+    count, tokens = 0, []
     ce = j.get("cedar_ember") if isinstance(j, dict) else None
     if isinstance(ce, dict):
         for grant in ce.get("grants") or []:
@@ -822,7 +850,7 @@ def _claude_resets_metric(j, now=None):
             left = _count(grant.get("resets_left"))
             count += left
             if left and end:
-                ends.append(end)
+                tokens.append({"expires": end, "count": left})
     extra = []
     jt = j.get("juniper_tide") if isinstance(j, dict) else None
     if isinstance(jt, dict) and jt.get("eligible"):
@@ -832,7 +860,7 @@ def _claude_resets_metric(j, now=None):
             back = _epoch(jt.get("next_available_at"))
             if back and back > now:
                 extra.append(f"5-hour back {_day(back)}")
-    return _resets_metric(count, min(ends) if ends else None, extra)
+    return _resets_metric(count, tokens, extra)
 
 
 # ---------- ChatGPT API credits ----------

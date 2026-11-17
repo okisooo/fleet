@@ -16,6 +16,7 @@ class PanelModelTests(unittest.TestCase):
         return model
 
     def test_a_waiting_reset_shows_in_the_closed_section_and_the_table(self):
+        # A reading saved before 0.4.2.6 named the row "Resets"; it reads as reset tokens.
         model = self.build([{
             "agent": "Codex", "plan": "pro", "err": "", "metrics": [
                 _metric("Weekly", 24.0, 1000.0 + 86400), _metric("Resets", None, None, "1 available · until Nov 30"),
@@ -23,8 +24,8 @@ class PanelModelTests(unittest.TestCase):
         }])
         provider = model["providers"][0]
         self.assertEqual([(m["short"], m["value"]) for m in provider["meters"]],
-                         [("Weekly", "24%"), ("Resets", "1 available · until Nov 30")])
-        self.assertIn("Resets", [r["label"] for g in provider["groups"] for r in g["rows"]])
+                         [("Weekly", "24%"), ("Reset tokens", "1 available · until Nov 30")])
+        self.assertIn("Reset tokens", [r["label"] for g in provider["groups"] for r in g["rows"]])
         self.assertEqual(provider["kind"], "rings")
         self.assertIsNone(provider["balance"])
 

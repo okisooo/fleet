@@ -12,7 +12,8 @@ filling lately (`rates`, from Fleet's own readings). Both are optional: without
 them the model is schema 2's plus the closed-section meters.
 
 Schema 5 adds `resets`, every upcoming reset and expiry across accounts, soonest
-first, and a provider `note` for figures that need a sentence of explanation.
+first; `tokens`, each account's waiting reset tokens; and a provider `note` for
+figures that need a sentence of explanation.
 """
 from __future__ import annotations
 
@@ -64,6 +65,8 @@ WINDOWS = {
     "monthly": ("Monthly limit", 30 * 86400),
     "balance": ("Balance", None),
     "credits": ("Credits", None),
+    # Readings saved before 0.4.2.6 named the reset-token row "Resets".
+    "resets": (fleet.RESET_TOKENS, None),
     "extra $": ("Extra usage", None),
     "messages": ("Messages", None),
     "pay-go": ("Pay as you go", None),
@@ -145,6 +148,15 @@ def _row(metric, label=None, window=None, scoped=False):
     amount, total = metric.get("amount"), metric.get("amount_total")
     if pct is not None and isinstance(amount, (int, float)) and isinstance(total, (int, float)) and total > 0:
         row.update(amount=float(amount), amount_total=float(total))
+    # Reset tokens: how many, how many could be redeemed now, and when each expires.
+    count = metric.get("count")
+    if row["label"] == fleet.RESET_TOKENS and isinstance(count, int) and count > 0:
+        tokens = [{"expires": float(t["expires"]), "count": int(t.get("count") or 1)}
+                  for t in metric.get("tokens") or []
+                  if isinstance(t, dict) and isinstance(t.get("expires"), (int, float))]
+        usable = metric.get("usable")
+        row.update(count=count, usable=usable if isinstance(usable, int) and usable > 0 else 0,
+                   tokens=sorted(tokens, key=lambda t: t["expires"]))
     return row
 
 
@@ -257,7 +269,7 @@ def _rings(name, groups):
 # Providers whose tokens can be priced from local logs: panel id -> ledger provider.
 LEDGER = {"claude": "claude", "codex": "codex"}
 PLAIN = ("5-hour limit", "Weekly limit", "Daily limit", "Monthly limit")
-RESETS = "Resets"
+RESETS = fleet.RESET_TOKENS
 CREDITS = fleet.API_CREDITS
 
 
@@ -292,37 +304,74 @@ def _meters(groups):
         fullest = max(rest, key=lambda r: r["pct"])
         if fullest["pct"] > max(r["pct"] for r in chosen):
             chosen.append(fullest)
-    # A waiting usage-limit reset is worth seeing without opening the section,
-    # and so are a subscription's API credits.
+    # Waiting reset tokens are worth seeing without opening the section, and so
+    # are a subscription's API credits.
     chosen += [r for g in groups for r in g["rows"] if r["label"] == RESETS and r.get("pct") is None]
     chosen += [r for g in groups for r in g["rows"] if r["label"] == CREDITS]
     return [dict(r, short=_meter_label(r["label"])) for r in chosen]
 
 
-def _expiring(value):
-    """'2 free resets expire', from a Resets row's '2 available · until Dec 2'."""
-    match = re.match(r"(\d+) available", str(value or ""))
-    count = int(match.group(1)) if match else 0
+def _expiring(count):
+    """'1 reset token expires', '2 reset tokens expire'."""
     if count == 1:
-        return "1 free reset expires"
-    return f"{count} free resets expire" if count else "Free resets expire"
+        return "1 reset token expires"
+    return f"{count} reset tokens expire" if count else "Reset tokens expire"
+
+
+def _token_lines(provider, row, now):
+    """One line per reset-token expiry (tokens sharing a minute share a line)."""
+    lines = {}
+    for token in row.get("tokens") or []:
+        if token["expires"] <= now:
+            continue
+        key = round(token["expires"] / 60)
+        line = lines.setdefault(key, {"id": provider["id"], "name": provider["name"], "icon": provider["icon"],
+                                      "mark": provider["mark"], "kind": "expiry", "labels": [],
+                                      "at": token["expires"], "state": "calm", "value": row.get("value"),
+                                      "count": 0})
+        line["count"] += token["count"]
+    for line in lines.values():
+        line["labels"] = [_expiring(line["count"])]
+    return list(lines.values())
+
+
+def _token_summary(providers, now):
+    """Each account's waiting reset tokens, the soonest to expire first: the pinned
+    "Reset tokens" line of the resets card."""
+    out = []
+    for provider in providers:
+        for group in provider["all_groups"]:
+            for row in group["rows"]:
+                if row["label"] != RESETS or not row.get("count"):
+                    continue
+                tokens = [t for t in row.get("tokens") or [] if t["expires"] > now]
+                out.append({"id": provider["id"], "name": provider["name"], "icon": provider["icon"],
+                            "mark": provider["mark"], "count": row["count"], "usable": row.get("usable") or 0,
+                            "next": tokens[0]["expires"] if tokens else None, "tokens": tokens})
+    out.sort(key=lambda t: (t["next"] is None, t["next"] or 0, t["name"]))
+    return out
 
 
 def _upcoming(providers, now):
     """Every reset and expiry across accounts, soonest first: the flyout's
     "Next resets" list. Limits on one account that reset in the same minute
     share a line ("Weekly, Fable wk"), kept apart from any that are used up,
-    so a "full" line names only the limits that block."""
+    so a "full" line names only the limits that block. Each reset token's
+    expiry is a line of its own."""
     out = []
     for provider in providers:
         lines = {}
         for group in provider["all_groups"]:
             for row in group["rows"]:
+                if row["label"] == RESETS and row.get("tokens"):
+                    out.extend(_token_lines(provider, row, now))
+                    continue
                 at = row.get("reset_at")
                 if not isinstance(at, (int, float)) or at <= now:
                     continue
                 if row["label"] == RESETS:
-                    kind, label = "expiry", _expiring(row.get("value"))
+                    # A reading saved before tokens were listed one by one.
+                    kind, label = "expiry", "Reset tokens expire"
                 elif row["label"] == CREDITS:
                     kind, label = "credits", "API credits renew"
                 elif row.get("pct") is not None:
@@ -645,6 +694,7 @@ def build(data, ts, now=None, settings=None, usage=None, rates=None, accounts=No
         "cached": len(providers) - fresh,
         "providers": providers,
         "resets": _upcoming(providers, now),
+        "tokens": _token_summary(providers, now),
         "inactive": inactive,
         "known": known,
         # Local history remains useful when a client is signed out. Never put

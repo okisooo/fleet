@@ -217,7 +217,8 @@ class UpcomingResetTests(unittest.TestCase):
                 metric("Fable", 100.0, NOW + 2 * 86400 + 0.4)]},
             {"agent": "Codex", "plan": "prolite", "err": "", "metrics": [
                 metric("Weekly", 47.0, NOW + 5 * 86400),
-                metric("Resets", None, NOW + 15 * 86400, "2 available · until Dec 2"),
+                fleet._resets_metric(2, [{"expires": NOW + 15 * 86400, "count": 1},
+                                         {"expires": NOW + 26 * 86400, "count": 1}]),
                 metric("API credits", None, RENEWS.timestamp(), "$100 a month", window_seconds=2592000)]},
             {"agent": "Antigrav", "plan": "", "err": "", "metrics": [
                 metric("Gemini", 3.0, NOW + 3600, group="Gemini", window="5h")]},
@@ -228,11 +229,14 @@ class UpcomingResetTests(unittest.TestCase):
             ("Claude", "5-hour", "limit", "calm"),
             ("Claude", "Weekly, Fable wk", "limit", "full"),
             ("Codex", "Weekly", "limit", "calm"),
-            ("Codex", "2 free resets expire", "expiry", "calm"),
+            ("Codex", "1 reset token expires", "expiry", "calm"),
             ("Codex", "API credits renew", "credits", "calm"),
+            ("Codex", "1 reset token expires", "expiry", "calm"),
         ])
-        self.assertEqual(model["resets"][-1]["value"], "$100 a month")
+        self.assertEqual(model["resets"][-2]["value"], "$100 a month")
         self.assertEqual([r["at"] for r in model["resets"]], sorted(r["at"] for r in model["resets"]))
+        self.assertEqual([(t["name"], t["count"], t["usable"], t["next"]) for t in model["tokens"]],
+                         [("Codex", 2, 0, NOW + 15 * 86400)])
 
     def test_a_used_up_limit_gets_its_own_line_beside_one_that_is_not(self):
         model = panel_model.build([
@@ -242,9 +246,23 @@ class UpcomingResetTests(unittest.TestCase):
         self.assertEqual([(", ".join(r["labels"]), r["state"]) for r in model["resets"]],
                          [("Weekly", "calm"), ("Fable wk", "full")])
 
-    def test_one_waiting_reset_reads_in_the_singular(self):
-        self.assertEqual(panel_model._expiring("1 available · until Dec 2"), "1 free reset expires")
-        self.assertEqual(panel_model._expiring("5-hour ready"), "Free resets expire")
+    def test_one_waiting_token_reads_in_the_singular(self):
+        self.assertEqual(panel_model._expiring(1), "1 reset token expires")
+        self.assertEqual(panel_model._expiring(3), "3 reset tokens expire")
+
+    def test_tokens_sharing_an_expiry_share_a_line(self):
+        model = panel_model.build([{"agent": "Claude", "family": "claude", "plan": "Max 5x", "err": "", "metrics": [
+            metric("Weekly", 10.0, NOW + 2 * 86400),
+            fleet._resets_metric(3, [{"expires": NOW + 3 * 86400, "count": 2}, {"expires": NOW + 3 * 86400 + 5, "count": 1}],
+                                 usable=1)]}], NOW, now=NOW)
+        tokens = [(r["labels"], r["at"]) for r in model["resets"] if r["kind"] == "expiry"]
+        self.assertEqual(tokens, [(["3 reset tokens expire"], NOW + 3 * 86400)])
+        self.assertEqual([(t["count"], t["usable"]) for t in model["tokens"]], [(3, 1)])
+
+    def test_no_tokens_no_summary(self):
+        model = panel_model.build([{"agent": "Codex", "plan": "pro", "err": "", "metrics": [
+            metric("Weekly", 10.0, NOW + 86400)]}], NOW, now=NOW)
+        self.assertEqual(model["tokens"], [])
 
     def test_past_resets_and_hidden_providers_are_left_out(self):
         model = panel_model.build([

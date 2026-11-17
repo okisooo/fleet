@@ -1,15 +1,23 @@
 # changelog
 
-## unreleased - next resets and ChatGPT API credits
+## unreleased - resets, reset tokens and ChatGPT API credits
 
-- **Next resets** at the top of the flyout lists every limit window across
+- **Resets** at the top of the flyout lists every limit window across
   accounts, soonest first, each with its exact local time ("Fri 8:00 AM") and
   a countdown that ticks while the flyout is open (with seconds in the last
-  hour). Used-up limits are marked in red. Free-reset expiries and API-credit
-  renewals are listed the same way. Closed, it shows the next reset and any
-  used-up limits, three lines so the flyout still fits a 1080p screen; click
-  it for the rest. The Dashboard lists them all and shows the time and a
-  countdown for every limit.
+  hour). Used-up limits are marked in red. Reset-token expiries and API-credit
+  renewals are listed the same way. Closed, it shows three lines so the flyout
+  still fits a 1080p screen: the reset tokens, the next reset and any used-up
+  limit; click it for the rest. The Dashboard lists them all and shows the
+  time and a countdown for every limit.
+- **Reset tokens**, the free usage-limit resets Codex and Claude grant, are
+  shown one by one. A pinned line in **Resets** gives each account's count and
+  when the next one expires, or "usable now" when Codex would accept one; each
+  token's expiry is its own line in the list, so two tokens no longer read as
+  expiring on the first one's date. The provider row is now called **Reset
+  tokens**, its open section lists every token's exact expiry with a
+  countdown, and a used-up limit says "reset token usable now" when Codex could
+  clear it. Fleet only reads them; redeem one in Codex (`/usage`) or Claude Code.
 - Hovering any countdown shows the exact reset time. Clock times round to the
   nearest minute, so a reset reported as 7:59:59.5 reads 8:00 AM. The open
   section's limits table now says Left or Used to match the setting.

@@ -43,7 +43,8 @@ namespace FleetPanel
         private const double Pad = 18;
         // Meters line up under the provider's name, past its icon.
         private const double Indent = 26;
-        private const double LabelColumn = 64;
+        // Wide enough for "Reset tokens" at 12 px.
+        private const double LabelColumn = 70;
         private const double KeyColumn = 92;
 
         private static readonly FontFamily DisplayFont = new FontFamily("Segoe UI Variable Display, Segoe UI");
@@ -773,15 +774,21 @@ namespace FleetPanel
             Grid.SetColumn(reset, 3);
             if (row.ResetAt != null)
             {
-                reset.ToolTip = Clock.Full(ResetVerb(row), row.ResetAt);
+                reset.ToolTip = row.Tokens.Count > 0 ? TokenExpiries(row) : Clock.Full(ResetVerb(row), row.ResetAt);
                 ToolTipService.SetInitialShowDelay(reset, 400);
             }
             tickers.Add(() => reset.Text = Clock.Left(row.ResetAt));
             return reset;
         }
 
+        private const string TokenLabel = "Reset tokens";
+
         private static string ResetVerb(Row row) =>
-            row.Label == "Resets" ? "Unused resets expire" : row.Label == "API credits" ? "Renews" : "Resets";
+            row.Label == TokenLabel ? "Next one expires" : row.Label == "API credits" ? "Renews" : "Resets";
+
+        /// <summary>"1 expires Wed, Dec 2 at 7:52 AM", one line per expiry.</summary>
+        private static string TokenExpiries(Row row) => string.Join("\n",
+            row.Tokens.Select(t => Clock.Full(t.Count == 1 ? "1 expires" : t.Count + " expire", t.Expires)));
 
         private static string ShortLabel(Row row)
         {
@@ -820,7 +827,7 @@ namespace FleetPanel
                     case "full":
                         glyph = "";
                         color = theme.CriticalText;
-                        text = c.Label + " limit reached · resets " + Clock.In(c.At);
+                        text = FullText(c, TokenUsable(p));
                         break;
                     case "runout":
                         glyph = "";
@@ -847,14 +854,24 @@ namespace FleetPanel
             if (p.FreshKind == "" && p.Caption != null)
             {
                 var caption = p.Caption;
+                var usable = TokenUsable(p);
                 tickers.Add(() =>
                 {
-                    if (caption.Kind == "full") label.Text = caption.Label + " limit reached · resets " + Clock.In(caption.At);
+                    if (caption.Kind == "full") label.Text = FullText(caption, usable);
                     else if (caption.Kind == "reset") label.Text = caption.Label + " almost used up · resets " + Clock.In(caption.At);
                 });
             }
             return row;
         }
+
+        /// <summary>True while the provider says one of its reset tokens could be redeemed now.</summary>
+        private static bool TokenUsable(Provider p) =>
+            p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).Any(r => r.Label == TokenLabel && r.Usable > 0);
+
+        /// <summary>A used-up limit: when it resets, or that a reset token could clear it
+        /// now (the countdown is on the meter above).</summary>
+        private static string FullText(Caption c, bool usable) =>
+            c.Label + " limit reached · " + (usable ? "reset token usable now" : "resets " + Clock.In(c.At));
 
         // ---------- an open section ----------
 
@@ -1019,6 +1036,11 @@ namespace FleetPanel
             {
                 stack.Children.Add(limits);
             }
+            var tokens = p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).FirstOrDefault(r => r.Label == TokenLabel && r.Count > 0);
+            if (tokens != null)
+            {
+                stack.Children.Add(Tokens(p, tokens));
+            }
             var credits = p.AllGroups.Concat(p.Groups).SelectMany(g => g.Rows).FirstOrDefault(r => r.Label == "API credits");
             if (credits != null || p.Note != "")
             {
@@ -1031,6 +1053,42 @@ namespace FleetPanel
                 stack.Children.Add(note);
             }
             return stack;
+        }
+
+        /// <summary>
+        /// An account's reset tokens one by one: when each expires, as a time and a
+        /// countdown, and where to redeem them.
+        /// </summary>
+        private FrameworkElement Tokens(Provider p, Row row)
+        {
+            var block = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+            var sheet = new Grid();
+            sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(KeyColumn) });
+            sheet.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var count = Value(row.Count.ToString(CultureInfo.InvariantCulture) + " waiting");
+            if (row.Usable > 0)
+            {
+                count.Inlines.Add(Run(" · " + (row.Usable >= row.Count ? "usable now" : row.Usable + " usable now"), 12, theme.Accent, FontWeights.SemiBold));
+            }
+            Pair(sheet, TokenLabel, count);
+            foreach (var token in row.Tokens)
+            {
+                var expires = Value(Clock.When(token.Expires));
+                var countdown = Run("", 12, theme.TextSecondary);
+                expires.Inlines.Add(countdown);
+                var at = token.Expires;
+                var many = token.Count > 1 ? " · " + token.Count + " tokens" : "";
+                tickers.Add(() => countdown.Text = " · in " + Clock.Left(at) + many);
+                expires.ToolTip = Clock.Full(token.Count == 1 ? "Expires" : token.Count + " expire", at) + ". Unused tokens are lost then.";
+                Pair(sheet, "Expires", expires);
+            }
+            block.Children.Add(sheet);
+            var note = Text("Redeem one in " + RedeemIn(p.Name) + "; Fleet only reads them.", 12, theme.TextSecondary);
+            note.TextWrapping = TextWrapping.Wrap;
+            note.TextTrimming = TextTrimming.None;
+            note.Margin = new Thickness(0, 4, 0, 0);
+            block.Children.Add(note);
+            return block;
         }
 
         private const string OpenAiAdmin = "openai-admin";
@@ -1130,9 +1188,11 @@ namespace FleetPanel
         /// </summary>
         private FrameworkElement Limits(Provider p)
         {
-            // API credits without a balance are only a sentence; the credits block says it.
+            // API credits without a balance are only a sentence, and reset tokens get
+            // their own block: those blocks say it.
             var rows = p.Groups.SelectMany(g => g.Rows.Select(r => new { Group = g.Title, Row = r }))
-                .Where(x => !(x.Row.Label == "API credits" && x.Row.Pct == null)).ToList();
+                .Where(x => !(x.Row.Label == "API credits" && x.Row.Pct == null) && !(x.Row.Label == TokenLabel && x.Row.Count > 0))
+                .ToList();
             if (rows.Count == 0)
             {
                 return null;

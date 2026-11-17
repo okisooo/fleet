@@ -64,10 +64,11 @@ namespace FleetPanel
             }
 
             var upcoming = UpcomingResets();
-            if (upcoming.Count > 0)
+            if (upcoming.Count > 0 || data.Tokens.Count > 0)
             {
-                body.Children.Add(DashTitle("Next resets"));
+                body.Children.Add(DashTitle("Resets"));
                 var list = new StackPanel { Margin = new Thickness(0, 0, 0, 16) };
+                if (data.Tokens.Count > 0) list.Children.Add(TokensRow());
                 foreach (var line in upcoming) list.Children.Add(ResetRow(line));
                 body.Children.Add(list);
             }
@@ -160,14 +161,16 @@ namespace FleetPanel
                         // A fact rather than a limit ("2 available · until Dec 2", "$100 a
                         // month"): it reads on one line across both columns.
                         DashRow(table, label, row.Value);
-                        Grid.SetColumnSpan(table.Children.OfType<TextBlock>().Last(), 2);
+                        var fact = table.Children.OfType<TextBlock>().Last();
+                        Grid.SetColumnSpan(fact, 2);
+                        if (row.Tokens.Count > 0) fact.ToolTip = TokenExpiries(row);
                         continue;
                     }
                     var index = DashRow(table, label, Figure(row), row.ResetAt == null ? "—" : Clock.Day(row.ResetAt));
                     var reset = table.Children.OfType<TextBlock>().Last();
                     if (row.ResetAt != null)
                     {
-                        // The exact time and a live countdown, as in "Next resets".
+                        // The exact time and a live countdown, as in the resets card.
                         tickers.Add(() => reset.Text = Clock.Day(row.ResetAt) + " · " + Clock.Left(row.ResetAt));
                         reset.ToolTip = Clock.Full(ResetVerb(row), row.ResetAt);
                     }
