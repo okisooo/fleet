@@ -169,6 +169,10 @@ class AlertTests(unittest.TestCase):
         self.assertEqual([title for title, _ in found], ["Claude weekly limit at 80%"])
         self.assertEqual(again, [])
 
+    def test_api_credits_read_as_one_name(self):
+        self.assertEqual(alerts._subject("OpenAI API", None, "API credits"), "OpenAI API credits")
+        self.assertEqual(alerts._subject("Codex", None, "API credits"), "Codex API credits")
+
     def test_crossing_two_thresholds_at_once_sends_only_the_higher(self):
         found, _ = self.run_alerts(_model(weekly=97, weekly_left=3600))
 

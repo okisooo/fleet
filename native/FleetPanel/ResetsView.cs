@@ -199,7 +199,7 @@ namespace FleetPanel
                         + ".\nRedeem it in " + RedeemIn(line.Name) + " before then.";
                     break;
                 case "credits":
-                    tip = line.Name + " · API credits: " + line.Value + "\n"
+                    tip = line.Name + " credits: " + line.Value + "\n"
                         + Clock.Full("Renew", at) + ". Unused credits don't roll over.";
                     break;
                 default:

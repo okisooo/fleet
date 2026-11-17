@@ -1,5 +1,15 @@
 # changelog
 
+## unreleased - OpenAI API credits at a glance
+
+- The OpenAI API credits included with ChatGPT Pro now have their own compact
+  **OpenAI API** row beside Claude API, instead of sitting inside Codex's
+  open section. With an admin key it reads like an account: a meter of what
+  is left, the exact time the credits renew and a countdown, and a warning if
+  the spend is on course to use them up before then. Opened, it adds what has
+  been used since the cycle began and today's (UTC) spend. Without a key the
+  row says to add one. Alerts name it "OpenAI API credits".
+
 ## unreleased - important first, and a quicker open
 
 - The flyout now puts what matters first. Every account is one compact row:

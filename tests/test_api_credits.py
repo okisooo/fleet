@@ -1,4 +1,4 @@
-"""ChatGPT's API credits on the Codex card, and the cross-account reset list.
+"""ChatGPT's API credits on their own OpenAI API row, and the cross-account reset list.
 
 Offline: every HTTP call is a fixture, and no credential store is read.
 """
@@ -27,10 +27,12 @@ def account_check(**entitlement):
     return {"accounts": {"acct-1": {"account": {"plan_type": "prolite"}, "entitlement": ent}}}
 
 
-def costs(*values, more=None):
-    page = {"object": "page", "data": [{"object": "bucket", "results": [
-        {"object": "organization.costs.result", "amount": {"value": v, "currency": "usd"}} for v in values]}],
-        "has_more": more is not None}
+def costs(*values, more=None, day=None):
+    bucket = {"object": "bucket", "results": [
+        {"object": "organization.costs.result", "amount": {"value": v, "currency": "usd"}} for v in values]}
+    if day is not None:
+        bucket.update(start_time=day, end_time=day + 86400)
+    page = {"object": "page", "data": [bucket], "has_more": more is not None}
     if more:
         page["next_page"] = more
     return page
@@ -91,15 +93,15 @@ class BillingCycleTests(unittest.TestCase):
 
 class ApiCreditTests(unittest.TestCase):
     def setUp(self):
-        fleet._API_CREDIT_SPEND.update(key=None, at=0.0, spend=None, err="")
+        fleet._API_CREDIT_SPEND.update(key=None, at=0.0, spend=None, today=None, err="")
         fleet._CHATGPT_CYCLE.update(account=None, at=0.0, cycle=None)
         self.cycle = {"start": STARTED, "end": RENEWS.timestamp()}
 
     def test_spend_since_the_cycle_start_is_summed_across_pages(self):
         pages = [(200, {}, costs(12.5, 0.25, more="p2")), (200, {}, costs(3.0))]
         with mock.patch.object(fleet, "_jget", side_effect=pages) as get:
-            spend, err = fleet._openai_spend_since(KEY, STARTED, now=NOW)
-        self.assertEqual((spend, err), (15.75, ""))
+            spend, today, err = fleet._openai_spend_since(KEY, STARTED, now=NOW)
+        self.assertEqual((spend, today, err), (15.75, None, ""))
         first = parse_qs(urlparse(get.call_args_list[0].args[0]).query)
         self.assertEqual(first["start_time"], [str(int(STARTED))])
         self.assertEqual(get.call_args_list[0].args[1], KEY)
@@ -112,20 +114,27 @@ class ApiCreditTests(unittest.TestCase):
         self.assertEqual(get.call_count, 1)
         with mock.patch.object(fleet, "_jget", return_value=(429, {}, {})):
             self.assertEqual(fleet._openai_spend_since(KEY, STARTED, now=NOW + 3600),
-                             (40.0, "OpenAI is rate limiting cost reports"))
+                             (40.0, None, "OpenAI is rate limiting cost reports"))
+
+    def test_todays_bucket_is_the_spend_so_far_today(self):
+        midnight = NOW - NOW % 86400
+        pages = [(200, {}, costs(30.0, day=midnight - 86400, more="p2")), (200, {}, costs(1.5, 0.25, day=midnight))]
+        with mock.patch.object(fleet, "_jget", side_effect=pages):
+            self.assertEqual(fleet._openai_spend_since(KEY, STARTED, now=NOW), (31.75, 1.75, ""))
 
     def test_a_rejected_key_or_odd_report_gives_no_total(self):
         with mock.patch.object(fleet, "_jget", return_value=(401, {}, {"error": {}})):
-            self.assertEqual(fleet._openai_spend_since(KEY, STARTED, now=NOW), (None, "OpenAI rejected the admin key"))
+            self.assertEqual(fleet._openai_spend_since(KEY, STARTED, now=NOW), (None, None, "OpenAI rejected the admin key"))
         fleet._API_CREDIT_SPEND.update(key=None)
         odd = costs(1)
         odd["data"][0]["results"][0]["amount"]["currency"] = "eur"
         with mock.patch.object(fleet, "_jget", return_value=(200, {}, odd)):
-            self.assertEqual(fleet._openai_spend_since(KEY, STARTED, now=NOW), (None, "unreadable cost report"))
+            self.assertEqual(fleet._openai_spend_since(KEY, STARTED, now=NOW), (None, None, "unreadable cost report"))
 
     def test_the_row_shows_what_is_left_and_when_it_renews(self):
-        metric = fleet._api_credits_metric("prolite", self.cycle, spend=37.2, keyed=True)
+        metric = fleet._api_credits_metric("prolite", self.cycle, spend=37.2, keyed=True, today=1.75)
         self.assertEqual(metric["label"], "API credits")
+        self.assertEqual((metric["today"], metric["since"]), (1.75, STARTED))
         self.assertEqual(metric["pct"], 37.2)
         self.assertEqual(metric["extra"], "$62.80 of $100 left")
         self.assertEqual(metric["resets"], RENEWS.timestamp())
@@ -180,33 +189,48 @@ def metric(label, pct=None, resets=None, extra="", **more):
 
 
 class PanelCreditTests(unittest.TestCase):
-    def codex(self, credits):
-        model = panel_model.build([{"agent": "Codex", "plan": "prolite", "err": "", "metrics": [
-            metric("Weekly", 47.0, NOW + 5 * 86400), credits]}], NOW, now=NOW)
+    def build(self, credits, **codex):
+        model = panel_model.build([dict({"agent": "Codex", "plan": "prolite", "err": "", "metrics": [
+            metric("Weekly", 47.0, NOW + 5 * 86400), credits]}, **codex)], NOW, now=NOW)
         json.dumps(model)
-        return model, model["providers"][0]
+        return model
 
-    def test_the_credits_row_is_a_meter_on_the_closed_card_but_never_the_ring(self):
+    def test_the_credits_are_an_openai_api_row_of_their_own(self):
         cycle = {"start": STARTED, "end": RENEWS.timestamp()}
-        model, codex = self.codex(fleet._api_credits_metric("prolite", cycle, spend=37.2, keyed=True))
-        self.assertEqual([(m["short"], m["value"]) for m in codex["meters"]],
-                         [("Weekly", "47%"), ("API credits", "$62.80 of $100 left")])
-        credits = codex["meters"][1]
+        model = self.build(fleet._api_credits_metric("prolite", cycle, spend=37.2, keyed=True, today=1.75))
+        codex, api = model["providers"]
+        # Codex keeps its limits; the money moves beside the other API accounts.
+        self.assertEqual([r["label"] for g in codex["all_groups"] for r in g["rows"]], ["Weekly limit"])
+        self.assertEqual((codex["glance"]["row"]["short"], codex["note"]), ("Weekly", ""))
+        self.assertEqual((api["id"], api["name"], api["glance"]), ("openai-api", "OpenAI API", None))
+        self.assertTrue(api["icon"].endswith("codex.png"))
+        credits = api["groups"][0]["rows"][0]
+        self.assertEqual((credits["label"], credits["value"]), ("API credits", "$62.80 of $100 left"))
         self.assertEqual((credits["pct"], credits["reset_at"]), (37.2, RENEWS.timestamp()))
         self.assertEqual((credits["amount"], credits["amount_total"]), (37.2, 100.0))
-        self.assertNotIn("amount", codex["meters"][0])
+        self.assertEqual((credits["today"], credits["since"]), (1.75, STARTED))
         self.assertEqual(credits["window"], round(RENEWS.timestamp() - STARTED))
-        self.assertIsNotNone(credits["elapsed"])
-        self.assertEqual([r["label"] for r in codex["rings"]], ["Weekly"])
-        self.assertIn("spend since", codex["note"])
+        self.assertIn("spend since", api["note"])
+        self.assertIn({"id": "openai-api", "name": "OpenAI API", "hidden": False}, model["known"])
+        renewal = [line for line in model["resets"] if line["kind"] == "credits"]
+        self.assertEqual([(line["name"], line["labels"]) for line in renewal], [("OpenAI API", ["Credits renew"])])
 
-    def test_without_a_key_the_closed_card_shows_the_grant_as_text(self):
+    def test_without_a_key_the_row_shows_the_grant_and_why(self):
         cycle = {"start": STARTED, "end": RENEWS.timestamp()}
-        _, codex = self.codex(fleet._api_credits_metric("prolite", cycle))
-        self.assertEqual([(m["short"], m["pct"], m["value"]) for m in codex["meters"]][1],
-                         ("API credits", None, "$100 a month"))
-        self.assertNotIn("amount", codex["meters"][1])
-        self.assertIn("admin key", codex["note"])
+        api = self.build(fleet._api_credits_metric("prolite", cycle))["providers"][1]
+        credits = api["groups"][0]["rows"][0]
+        self.assertEqual((credits["pct"], credits["value"]), (None, "$100 a month"))
+        self.assertNotIn("amount", credits)
+        self.assertIn("admin key", api["note"])
+
+    def test_the_row_shares_the_age_of_codexs_reading(self):
+        cycle = {"start": STARTED, "end": RENEWS.timestamp()}
+        credits = fleet._api_credits_metric("prolite", cycle, spend=37.2, keyed=True)
+        api = self.build(credits, err="http 503", cached_at=NOW - 7200)["providers"][1]
+        self.assertEqual((api["freshness"]["kind"], api["freshness"]["stale"]), ("cached", True))
+        # A dead sign-in: Codex's row offers the fix, and the credits wait for it.
+        model = self.build(credits, err="token expired (run codex once)", cached_at=NOW - 60)
+        self.assertNotIn("OpenAI API", [p["name"] for p in model["providers"]])
 
 
 class UpcomingResetTests(unittest.TestCase):
@@ -230,7 +254,7 @@ class UpcomingResetTests(unittest.TestCase):
             ("Claude", "Weekly, Fable wk", "limit", "full"),
             ("Codex", "Weekly", "limit", "calm"),
             ("Codex", "1 reset token expires", "expiry", "calm"),
-            ("Codex", "API credits renew", "credits", "calm"),
+            ("OpenAI API", "Credits renew", "credits", "calm"),
             ("Codex", "1 reset token expires", "expiry", "calm"),
         ])
         self.assertEqual(model["resets"][-2]["value"], "$100 a month")

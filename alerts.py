@@ -37,6 +37,9 @@ def _subject(name, group, label):
     words = str(label or "Limit")
     if words.split()[0] in ("Weekly", "Daily", "Monthly"):
         words = words[:1].lower() + words[1:]
+    # ("OpenAI API", None, "API credits") -> "OpenAI API credits".
+    if str(name or "").endswith(" API") and words.startswith("API "):
+        words = words[len("API "):]
     return " ".join(part for part in (name, group, words) if part)
 
 

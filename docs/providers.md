@@ -6,8 +6,9 @@ Fleet shows two kinds of provider:
   from the CLI/app state already on the machine. Nothing to configure.
   Codex and Claude also show a **Reset tokens** row while free usage-limit
   resets are waiting: how many, and when the next one expires. Redeem one in
-  Codex (`/usage`) or Claude Code; Fleet only reads them. Codex also shows the monthly OpenAI **API credits** a ChatGPT plan
-  includes ([below](#chatgpt-api-credits)).
+  Codex (`/usage`) or Claude Code; Fleet only reads them. The monthly OpenAI
+  **API credits** a ChatGPT plan includes get an **OpenAI API** row of their own
+  ([below](#chatgpt-api-credits)), read with Codex's sign-in.
   **Resets** at the top of the flyout pins each account's reset tokens, then
   lists every limit window across accounts, soonest first, with the exact
   local time and a live countdown; each token's expiry and the API-credit
@@ -104,9 +105,13 @@ for the API organization you link from ChatGPT or API Platform billing. They
 expire at the end of each ChatGPT billing cycle without rollover, are spent
 before purchased credits, and do not raise ChatGPT or Codex usage limits.
 
-- The Codex card shows an **API credits** row only for plans Fleet can match to
-  OpenAI's table. So far that is the $100 Pro tier (ChatGPT reports it as
-  `prolite`): $100 a month. Other tiers stay hidden until verified.
+- An **OpenAI API** row beside the other API accounts shows the credits, only
+  for plans Fleet can match to OpenAI's table. So far that is the $100 Pro tier
+  (ChatGPT reports it as `prolite`): $100 a month. Other tiers stay hidden
+  until verified. With an admin key the row is a meter of what is left, with
+  the exact renewal time, a countdown and a warning when the spend would use
+  the credits up before they renew; opened, it shows the amount used since the
+  cycle began and today's (UTC) bucket of the cost report.
 - The renewal is the end of the ChatGPT billing cycle, read with Codex's
   existing sign-in from the same account check the ChatGPT web app makes, at
   most every six hours. It appears in **Resets** with the limits.
